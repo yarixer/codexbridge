@@ -107,7 +107,6 @@ pub async fn execute_task(
     .await?;
     store.save_artifact(task_id, WORKTREE_ARTIFACT, &worktree)?;
     store.transition(task_id, expected, TaskStatus::Executing, None)?;
-    let task = store.increment_worker_attempts(task_id)?;
     let previous_review = store.load_artifact::<ArchitectReview>(task_id, REVIEW_ARTIFACT)?;
     let prompt = worker_prompt(&task.spec, &plan, previous_review.as_ref())?;
     let worker =
@@ -123,6 +122,7 @@ pub async fn execute_task(
                 return Err(error);
             }
         };
+    store.increment_worker_attempts(task_id)?;
     store.save_artifact(task_id, WORKER_ARTIFACT, &worker)?;
     store.transition(task_id, TaskStatus::Executing, TaskStatus::Validating, None)?;
     let validation = match validation::run_all(&worktree, &task.spec.validation_commands).await {
