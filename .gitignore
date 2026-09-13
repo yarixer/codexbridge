@@ -1,0 +1,9 @@
+/target/
+/node_modules/
+/dist/
+/.tools/
+*.log
+.env
+.env.*
+!.env.example
+

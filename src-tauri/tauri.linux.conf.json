@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "../.tools/cursor-sdk-bridge/bin/cursor-sdk-bridge": "cursor-sdk-bridge/bin/cursor-sdk-bridge",
+      "../.tools/cursor-sdk-bridge/manifest.json": "cursor-sdk-bridge/manifest.json"
+    }
+  }
+}

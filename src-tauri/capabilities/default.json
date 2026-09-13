@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default Yarocursor desktop permissions",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:allow-open-url"]
+}
