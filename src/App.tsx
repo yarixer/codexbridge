@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
@@ -54,7 +54,7 @@ type TaskSession = {
     id: string;
     status: string;
     workerAttempts: number;
-    spec: { baseCommit: string };
+    spec: { baseCommit: string; maxWorkerAttempts: number };
   };
   plan?: { summary: string; workItems: WorkItem[]; risks: string[] };
   worktree?: string;
@@ -96,6 +96,13 @@ export default function App() {
   const [validationCommands, setValidationCommands] = useState("cargo test --workspace\nnpm run build");
   const [session, setSession] = useState<TaskSession>();
   const [workflowBusy, setWorkflowBusy] = useState<"planning" | "executing">();
+  const workflowPending = useRef(false);
+
+  useEffect(() => {
+    invoke<TaskSession | null>("latest_task_session").then((latest) => {
+      if (latest) setSession(latest);
+    }).catch(() => undefined);
+  }, []);
 
   const readyCount = useMemo(
     () => [report?.codex.state, report?.cursor.state].filter((state) => state === "ready").length,
@@ -127,6 +134,8 @@ export default function App() {
   }
 
   async function createPlan() {
+    if (workflowPending.current) return;
+    workflowPending.current = true;
     setError(undefined);
     setWorkflowBusy("planning");
     setSession(undefined);
@@ -142,12 +151,14 @@ export default function App() {
     } catch (reason) {
       setError(String(reason));
     } finally {
+      workflowPending.current = false;
       setWorkflowBusy(undefined);
     }
   }
 
   async function executePlan() {
-    if (!session) return;
+    if (!session || workflowPending.current) return;
+    workflowPending.current = true;
     setError(undefined);
     setWorkflowBusy("executing");
     try {
@@ -155,6 +166,7 @@ export default function App() {
     } catch (reason) {
       setError(String(reason));
     } finally {
+      workflowPending.current = false;
       setWorkflowBusy(undefined);
     }
   }
@@ -264,10 +276,10 @@ export default function App() {
                       ))}
                     </ol>
                     {session.plan.risks.length > 0 && <p className="risk-line">Риски: {session.plan.risks.join(" · ")}</p>}
-                    {(session.task.status === "planning" || session.task.status === "needsRevision") && (
+                    {(session.task.status === "planning" || session.task.status === "needsRevision" || session.task.status === "blocked") && session.task.workerAttempts < session.task.spec.maxWorkerAttempts && (
                       <button className="primary-action" onClick={executePlan} disabled={!!workflowBusy}>
                         {workflowBusy === "executing" ? <LoaderCircle className="spin" size={18} /> : <Hammer size={18} />}
-                        {workflowBusy === "executing" ? "Grok работает, затем Astra проверит…" : session.task.status === "needsRevision" ? "Отправить Grok на исправление" : "Утвердить план и запустить Grok"}
+                        {workflowBusy === "executing" ? "Grok работает, затем Astra проверит…" : session.task.status === "needsRevision" || session.task.status === "blocked" ? "Повторить запуск Grok" : "Утвердить план и запустить Grok"}
                       </button>
                     )}
                   </div>

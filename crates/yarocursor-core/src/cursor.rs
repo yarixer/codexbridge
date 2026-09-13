@@ -205,7 +205,7 @@ async fn execute_inner(
                     "name": "Yarocursor worker",
                     "local": {
                         "cwd": [workspace],
-                        "sandboxOptions": { "enabled": true },
+                        "sandboxOptions": { "enabled": false },
                         "autoReview": false
                     }
                 }

@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::RwLock};
+use std::{collections::HashSet, path::PathBuf, sync::RwLock};
 
 use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Manager, State};
@@ -12,6 +12,7 @@ struct AppState {
     cursor_bridge_binary: Option<PathBuf>,
     task_store: TaskStore,
     worktree_root: PathBuf,
+    active_tasks: tokio::sync::Mutex<HashSet<Uuid>>,
 }
 
 impl AppState {
@@ -26,6 +27,7 @@ impl AppState {
             cursor_bridge_binary,
             task_store,
             worktree_root,
+            active_tasks: tokio::sync::Mutex::new(HashSet::new()),
         }
     }
 }
@@ -97,15 +99,40 @@ async fn execute_task(
         .as_ref()
         .map(|secret| secret.expose_secret().to_owned())
         .ok_or("Cursor API key не задан")?;
-    yarocursor_core::orchestrator::execute_task(
+    {
+        let mut active_tasks = state.active_tasks.lock().await;
+        if !active_tasks.insert(task_id) {
+            return Err("Эта задача уже выполняется".into());
+        }
+    }
+    let result = yarocursor_core::orchestrator::execute_task(
         &state.task_store,
         task_id,
         &cursor_api_key,
         state.cursor_bridge_binary.as_deref(),
         &state.worktree_root,
     )
-    .await
-    .map_err(|error| error.to_string())
+    .await;
+    state.active_tasks.lock().await.remove(&task_id);
+    result.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn latest_task_session(
+    state: State<'_, AppState>,
+) -> Result<Option<yarocursor_core::orchestrator::TaskSession>, String> {
+    let Some(task) = state
+        .task_store
+        .list_tasks()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    yarocursor_core::orchestrator::load_session(&state.task_store, task.id)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -136,7 +163,8 @@ pub fn run() {
             inspect_environment,
             start_codex_login,
             create_task_plan,
-            execute_task
+            execute_task,
+            latest_task_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running Yarocursor");

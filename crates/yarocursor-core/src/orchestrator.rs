@@ -89,6 +89,7 @@ pub async fn execute_task(
     let expected = match task.status {
         TaskStatus::Planning => TaskStatus::Planning,
         TaskStatus::NeedsRevision => TaskStatus::NeedsRevision,
+        TaskStatus::Blocked => TaskStatus::Blocked,
         status => return Err(anyhow!("задачу в состоянии {status} нельзя запустить")),
     };
     if task.worker_attempts >= task.spec.max_worker_attempts {

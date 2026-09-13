@@ -54,4 +54,4 @@ cargo run -p yarocursor-core --bin yarocursor-plan -- /path/to/project "Describe
 
 ## Current security boundary
 
-Astra runs with Codex App Server's `readOnly` sandbox and never receives write access. Grok runs through Cursor's local-agent sandbox inside a detached Git worktree created from the recorded base commit. Validation commands are launched directly from argument arrays without a shell. The original checkout is not used as the worker directory; completed worktrees remain available for inspection and manual integration.
+Astra runs with Codex App Server's `readOnly` sandbox and never receives write access. Grok runs inside a detached Git worktree created from the recorded base commit. Cursor's local SDK sandbox is disabled because it is unavailable in some supported desktop environments, including Windows; the worktree is the current worker isolation boundary. Validation commands are launched directly from argument arrays without a shell. The original checkout is not used as the worker directory; completed worktrees remain available for inspection and manual integration.
