@@ -235,12 +235,16 @@ export default function App() {
               {busy ? "Проверяю…" : "Запустить диагностику"}
             </button>
 
-            {readyCount === 2 && (
+            {(readyCount === 2 || !!session?.plan) && (
               <section className="workflow">
                 <div className="section-heading">
                   <span className="step-number">01</span>
                   <div><span className="eyebrow">ORCHESTRATION</span><h3>Новая задача</h3></div>
                 </div>
+
+                {session?.plan && readyCount !== 2 && (
+                  <div className="login-banner"><CircleAlert size={18} /><span>Сессия восстановлена. Вставьте Cursor API key и запустите диагностику, чтобы продолжить выполнение.</span></div>
+                )}
 
                 <label>
                   <span>Цель</span>
@@ -277,7 +281,7 @@ export default function App() {
                     </ol>
                     {session.plan.risks.length > 0 && <p className="risk-line">Риски: {session.plan.risks.join(" · ")}</p>}
                     {((session.task.status === "planning" || session.task.status === "needsRevision") && session.task.workerAttempts < session.task.spec.maxWorkerAttempts || session.task.status === "blocked") && (
-                      <button className="primary-action" onClick={executePlan} disabled={!!workflowBusy}>
+                      <button className="primary-action" onClick={executePlan} disabled={!!workflowBusy || readyCount !== 2}>
                         {workflowBusy === "executing" ? <LoaderCircle className="spin" size={18} /> : <Hammer size={18} />}
                         {workflowBusy === "executing" ? "Grok работает, затем Astra проверит…" : session.task.status === "needsRevision" || session.task.status === "blocked" ? "Повторить запуск Grok" : "Утвердить план и запустить Grok"}
                       </button>
