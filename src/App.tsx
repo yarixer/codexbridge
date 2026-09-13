@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CircleAlert,
   FolderGit2,
+  FolderOpen,
   GitBranch,
   Hammer,
   KeyRound,
@@ -172,6 +173,16 @@ export default function App() {
     }
   }
 
+  async function openWorktree() {
+    if (!session) return;
+    setError(undefined);
+    try {
+      await invoke("open_task_worktree", { taskId: session.task.id });
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function login() {
     setError(undefined);
     setLoginStarted(false);
@@ -301,6 +312,7 @@ export default function App() {
                     <div className="result-heading"><Hammer size={19} /><div><span className="eyebrow">GROK RESULT</span><strong>{session.worker.status}</strong></div></div>
                     <p>{session.worker.text || "Исполнитель завершил работу без итогового сообщения."}</p>
                     {session.worktree && <code>{session.worktree}</code>}
+                    {session.worktree && <button className="inline-action" onClick={openWorktree}><FolderOpen size={17} /> Открыть папку с результатом</button>}
                   </div>
                 )}
 
@@ -316,6 +328,13 @@ export default function App() {
                     <div className="result-heading"><ShieldCheck size={19} /><div><span className="eyebrow">ASTRA REVIEW</span><strong>{session.review.approved ? "Одобрено" : "Нужна доработка"}</strong></div></div>
                     <p>{session.review.summary}</p>
                     {session.review.issues.map((issue) => <div className="review-issue" key={issue}>{issue}</div>)}
+                  </div>
+                )}
+
+                {session?.worker && !session.review && (
+                  <div className="result-card">
+                    <div className="result-heading"><ShieldCheck size={19} /><div><span className="eyebrow">ASTRA REVIEW</span><strong>{session.blockedFrom === "validating" ? "Ожидает завершения проверок" : "Ещё не выполнена"}</strong></div></div>
+                    <p>{session.blockedFrom === "validating" ? "Grok завершил работу, но локальная валидация была прервана. Нажмите «Продолжить проверку»: Yarocursor запустит проверки и затем отправит diff Astra." : "Проверка Astra появится после успешной локальной валидации."}</p>
                   </div>
                 )}
               </section>

@@ -124,6 +124,29 @@ async fn execute_task(
 }
 
 #[tauri::command]
+fn open_task_worktree(
+    task_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let task_id = Uuid::parse_str(&task_id).map_err(|_| "Некорректный task id")?;
+    let worktree = state
+        .task_store
+        .load_artifact::<PathBuf>(task_id, "git.worktree")
+        .map_err(|error| error.to_string())?
+        .ok_or("Рабочая папка Grok не найдена")?;
+    if !worktree.is_dir() {
+        return Err(format!(
+            "Рабочая папка не существует: {}",
+            worktree.display()
+        ));
+    }
+    app.opener()
+        .open_path(worktree.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|error| format!("Не удалось открыть рабочую папку: {error}"))
+}
+
+#[tauri::command]
 fn latest_task_session(
     state: State<'_, AppState>,
 ) -> Result<Option<yarocursor_core::orchestrator::TaskSession>, String> {
@@ -178,6 +201,7 @@ pub fn run() {
             start_codex_login,
             create_task_plan,
             execute_task,
+            open_task_worktree,
             latest_task_session
         ])
         .run(tauri::generate_context!())
