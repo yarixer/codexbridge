@@ -92,7 +92,7 @@ pub async fn execute_task(
         TaskStatus::Blocked => TaskStatus::Blocked,
         status => return Err(anyhow!("задачу в состоянии {status} нельзя запустить")),
     };
-    if task.worker_attempts >= task.spec.max_worker_attempts {
+    if task.worker_attempts >= task.spec.max_worker_attempts && expected != TaskStatus::Blocked {
         return Err(anyhow!("исчерпан лимит попыток Grok"));
     }
     let plan = store
@@ -225,6 +225,29 @@ pub fn load_session(store: &TaskStore, task_id: Uuid) -> Result<TaskSession> {
     })
 }
 
+pub fn recover_interrupted_tasks(store: &TaskStore) -> Result<usize> {
+    let mut recovered = 0;
+    for task in store.list_tasks()? {
+        let interrupted = match task.status {
+            TaskStatus::Executing | TaskStatus::Validating | TaskStatus::Reviewing => true,
+            TaskStatus::Planning => store
+                .load_artifact::<ArchitectPlan>(task.id, PLAN_ARTIFACT)?
+                .is_none(),
+            _ => false,
+        };
+        if interrupted {
+            store.transition(
+                task.id,
+                task.status,
+                TaskStatus::Blocked,
+                Some("предыдущий процесс Yarocursor завершился во время выполнения"),
+            )?;
+            recovered += 1;
+        }
+    }
+    Ok(recovered)
+}
+
 fn worker_prompt(
     spec: &TaskSpec,
     plan: &ArchitectPlan,
@@ -244,4 +267,72 @@ fn worker_prompt(
         serde_json::to_string_pretty(plan)?,
         revision
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec() -> TaskSpec {
+        TaskSpec {
+            goal: "test".into(),
+            workspace: "C:/repo".into(),
+            base_commit: "abc123".into(),
+            constraints: vec![],
+            acceptance_criteria: vec![],
+            validation_commands: vec![],
+            max_worker_attempts: 2,
+        }
+    }
+
+    fn plan() -> ArchitectPlan {
+        ArchitectPlan {
+            summary: "plan".into(),
+            work_items: vec![],
+            risks: vec![],
+        }
+    }
+
+    #[test]
+    fn recovers_only_interrupted_active_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = TaskStore::open(directory.path().join("state.db")).unwrap();
+        let interrupted = store.create_task(spec()).unwrap();
+        store
+            .transition(
+                interrupted.id,
+                TaskStatus::Draft,
+                TaskStatus::Planning,
+                None,
+            )
+            .unwrap();
+        store
+            .save_artifact(interrupted.id, PLAN_ARTIFACT, &plan())
+            .unwrap();
+        store
+            .transition(
+                interrupted.id,
+                TaskStatus::Planning,
+                TaskStatus::Executing,
+                None,
+            )
+            .unwrap();
+        let ready = store.create_task(spec()).unwrap();
+        store
+            .transition(ready.id, TaskStatus::Draft, TaskStatus::Planning, None)
+            .unwrap();
+        store
+            .save_artifact(ready.id, PLAN_ARTIFACT, &plan())
+            .unwrap();
+
+        assert_eq!(recover_interrupted_tasks(&store).unwrap(), 1);
+        assert_eq!(
+            store.get_task(interrupted.id).unwrap().unwrap().status,
+            TaskStatus::Blocked
+        );
+        assert_eq!(
+            store.get_task(ready.id).unwrap().unwrap().status,
+            TaskStatus::Planning
+        );
+    }
 }

@@ -154,6 +154,7 @@ pub fn run() {
             let app_data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data)?;
             let task_store = TaskStore::open(app_data.join("yarocursor.sqlite"))?;
+            yarocursor_core::orchestrator::recover_interrupted_tasks(&task_store)?;
             let worktree_root = app_data.join("worktrees");
             app.manage(AppState::new(bridge, task_store, worktree_root));
             Ok(())

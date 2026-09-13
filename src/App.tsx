@@ -276,7 +276,7 @@ export default function App() {
                       ))}
                     </ol>
                     {session.plan.risks.length > 0 && <p className="risk-line">Риски: {session.plan.risks.join(" · ")}</p>}
-                    {(session.task.status === "planning" || session.task.status === "needsRevision" || session.task.status === "blocked") && session.task.workerAttempts < session.task.spec.maxWorkerAttempts && (
+                    {((session.task.status === "planning" || session.task.status === "needsRevision") && session.task.workerAttempts < session.task.spec.maxWorkerAttempts || session.task.status === "blocked") && (
                       <button className="primary-action" onClick={executePlan} disabled={!!workflowBusy}>
                         {workflowBusy === "executing" ? <LoaderCircle className="spin" size={18} /> : <Hammer size={18} />}
                         {workflowBusy === "executing" ? "Grok работает, затем Astra проверит…" : session.task.status === "needsRevision" || session.task.status === "blocked" ? "Повторить запуск Grok" : "Утвердить план и запустить Grok"}
