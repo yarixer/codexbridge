@@ -1,7 +1,8 @@
 use std::{path::PathBuf, sync::RwLock};
 
 use secrecy::{ExposeSecret, SecretString};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 struct AppState {
     cursor_api_key: RwLock<Option<SecretString>>,
@@ -50,7 +51,7 @@ async fn inspect_environment(
 }
 
 #[tauri::command]
-async fn start_codex_login(state: State<'_, AppState>) -> Result<String, String> {
+async fn start_codex_login(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let (client, url) = yarocursor_core::codex::begin_chatgpt_login()
         .await
         .map_err(|error| error.to_string())?;
@@ -58,7 +59,9 @@ async fn start_codex_login(state: State<'_, AppState>) -> Result<String, String>
     if let Some(previous) = active_login.replace(client) {
         previous.shutdown().await;
     }
-    Ok(url)
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| format!("Не удалось открыть браузер: {error}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

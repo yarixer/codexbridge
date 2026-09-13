@@ -152,7 +152,9 @@ pub async fn probe() -> ProviderHealth {
         }
     };
 
-    let account = client.request("account/read", json!({})).await;
+    let account = client
+        .request("account/read", json!({ "refreshToken": false }))
+        .await;
     let account_value = match account {
         Ok(value) => value,
         Err(error) => {
@@ -167,14 +169,22 @@ pub async fn probe() -> ProviderHealth {
         }
     };
 
-    let account_data = account_value.get("account").unwrap_or(&account_value);
-    let auth_mode = account_data.get("authMode").and_then(Value::as_str);
-    if auth_mode.is_none() || account_data.is_null() {
+    let account_type = chatgpt_account_type(&account_value);
+    if account_type != Some("chatgpt") {
         client.shutdown().await;
+        let detail = match account_type {
+            Some("apiKey") => {
+                "Codex сейчас использует OpenAI API key. Войди через ChatGPT, чтобы расходовать лимиты подписки."
+            }
+            Some(_) => {
+                "Codex использует другой способ авторизации. Войди через ChatGPT, чтобы Astra работала по подписке."
+            }
+            None => "Войди через ChatGPT, чтобы Astra использовала лимиты подписки.",
+        };
         return ProviderHealth {
             state: HealthState::NeedsLogin,
             title: "Требуется вход в ChatGPT".into(),
-            detail: "Войди через ChatGPT, чтобы Astra использовала лимиты подписки.".into(),
+            detail: detail.into(),
             models: vec![],
             usage: None,
         };
@@ -242,7 +252,7 @@ pub async fn begin_chatgpt_login() -> Result<(CodexClient, String)> {
             json!({
                 "type": "chatgpt",
                 "useHostedLoginSuccessPage": true,
-                "appBrand": "codex"
+                "appBrand": "chatgpt"
             }),
         )
         .await?;
@@ -252,4 +262,39 @@ pub async fn begin_chatgpt_login() -> Result<(CodexClient, String)> {
         .context("Codex не вернул authUrl")?
         .to_owned();
     Ok((client, url))
+}
+
+fn chatgpt_account_type(account_read: &Value) -> Option<&str> {
+    account_read
+        .get("account")
+        .and_then(|account| account.get("type"))
+        .and_then(Value::as_str)
+        .or_else(|| account_read.get("authMode").and_then(Value::as_str))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chatgpt_account_type;
+    use serde_json::json;
+
+    #[test]
+    fn reads_chatgpt_account_from_current_app_server_shape() {
+        let response = json!({
+            "account": {
+                "type": "chatgpt",
+                "email": "developer@example.com",
+                "planType": "plus"
+            },
+            "requiresOpenaiAuth": true
+        });
+
+        assert_eq!(chatgpt_account_type(&response), Some("chatgpt"));
+    }
+
+    #[test]
+    fn treats_null_account_as_signed_out() {
+        let response = json!({ "account": null, "requiresOpenaiAuth": true });
+
+        assert_eq!(chatgpt_account_type(&response), None);
+    }
 }

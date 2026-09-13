@@ -51,6 +51,7 @@ h1 { font-size: 22px; margin-top: 7px; letter-spacing: -.02em; }
 .primary-action:disabled { opacity: .5; cursor: default; }
 .inline-action { margin-top: 12px; margin-left: auto; background: transparent; color: #b4e36a; font-size: 12px; }
 .error-banner { border-left: 2px solid #cb6f62; background: #1c1715; color: #dba79f; display: flex; gap: 10px; align-items: flex-start; padding: 14px; margin-top: 18px; font-size: 12px; line-height: 1.5; }
+.login-banner { border-left: 2px solid #b4e36a; background: #171c14; color: #c8d7b7; display: flex; gap: 10px; align-items: flex-start; padding: 14px; margin-top: 18px; font-size: 12px; line-height: 1.5; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

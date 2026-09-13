@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Activity,
   Bot,
@@ -63,6 +62,7 @@ export default function App() {
   const [cursorKey, setCursorKey] = useState("");
   const [report, setReport] = useState<EnvironmentReport>();
   const [busy, setBusy] = useState(false);
+  const [loginStarted, setLoginStarted] = useState(false);
   const [error, setError] = useState<string>();
 
   const readyCount = useMemo(
@@ -85,9 +85,10 @@ export default function App() {
 
   async function login() {
     setError(undefined);
+    setLoginStarted(false);
     try {
-      const url = await invoke<string>("start_codex_login");
-      await openUrl(url);
+      await invoke("start_codex_login");
+      setLoginStarted(true);
     } catch (reason) {
       setError(String(reason));
     }
@@ -133,6 +134,10 @@ export default function App() {
 
             {report?.codex.state === "needsLogin" && (
               <button className="inline-action" onClick={login}><KeyRound size={17} /> Войти через ChatGPT <ChevronRight size={16} /></button>
+            )}
+
+            {loginStarted && (
+              <div className="login-banner"><Check size={18} /><span>Браузер открыт. Заверши вход в ChatGPT, затем снова запусти диагностику.</span></div>
             )}
 
             {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span></div>}

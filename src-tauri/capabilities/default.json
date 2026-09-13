@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default Yarocursor desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:allow-open-url"]
+  "permissions": ["core:default"]
 }
