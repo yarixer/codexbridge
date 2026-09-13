@@ -12,6 +12,7 @@ struct AppState {
     cursor_bridge_binary: Option<PathBuf>,
     task_store: TaskStore,
     worktree_root: PathBuf,
+    cursor_state_root: PathBuf,
     active_tasks: tokio::sync::Mutex<HashSet<Uuid>>,
 }
 
@@ -20,6 +21,7 @@ impl AppState {
         cursor_bridge_binary: Option<PathBuf>,
         task_store: TaskStore,
         worktree_root: PathBuf,
+        cursor_state_root: PathBuf,
     ) -> Self {
         Self {
             cursor_api_key: RwLock::new(None),
@@ -27,6 +29,7 @@ impl AppState {
             cursor_bridge_binary,
             task_store,
             worktree_root,
+            cursor_state_root,
             active_tasks: tokio::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -54,10 +57,12 @@ async fn inspect_environment(
         .map_err(|_| "Не удалось прочитать настройки")?
         .as_ref()
         .map(|secret| secret.expose_secret().to_owned());
+    let diagnostic_state_root = state.cursor_state_root.join("diagnostics");
     Ok(yarocursor_core::diagnostics::inspect(
         &workspace,
         cursor_key.as_deref(),
         state.cursor_bridge_binary.as_deref(),
+        Some(&diagnostic_state_root),
     )
     .await)
 }
@@ -111,6 +116,7 @@ async fn execute_task(
         &cursor_api_key,
         state.cursor_bridge_binary.as_deref(),
         &state.worktree_root,
+        &state.cursor_state_root,
     )
     .await;
     state.active_tasks.lock().await.remove(&task_id);
@@ -156,7 +162,14 @@ pub fn run() {
             let task_store = TaskStore::open(app_data.join("yarocursor.sqlite"))?;
             yarocursor_core::orchestrator::recover_interrupted_tasks(&task_store)?;
             let worktree_root = app_data.join("worktrees");
-            app.manage(AppState::new(bridge, task_store, worktree_root));
+            let cursor_state_root = app_data.join("cursor-sdk-state");
+            std::fs::create_dir_all(&cursor_state_root)?;
+            app.manage(AppState::new(
+                bridge,
+                task_store,
+                worktree_root,
+                cursor_state_root,
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -35,15 +35,32 @@ struct Bridge {
 }
 
 impl Bridge {
-    async fn spawn(binary: &Path, workspace: &str, api_key: &str) -> Result<Self> {
-        let mut child = Command::new(binary)
+    async fn spawn(
+        binary: &Path,
+        workspace: &str,
+        api_key: &str,
+        state_root: Option<&Path>,
+    ) -> Result<Self> {
+        let mut command = Command::new(binary);
+        command
             .args(["--workspace", workspace])
             .env("CURSOR_API_KEY", api_key)
             .env("CURSOR_SDK_CLIENT_LANGUAGE", "rust")
+            .current_dir(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        if let Some(state_root) = state_root {
+            std::fs::create_dir_all(state_root).with_context(|| {
+                format!(
+                    "не удалось создать каталог состояния Cursor {}",
+                    state_root.display()
+                )
+            })?;
+            command.arg("--state-root").arg(state_root);
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("не удалось запустить {}", binary.display()))?;
         let stderr = child.stderr.take().context("bridge не открыл stderr")?;
@@ -167,6 +184,7 @@ pub async fn execute(
     workspace: &Path,
     api_key: &str,
     preferred_binary: Option<&Path>,
+    state_root: &Path,
     prompt: &str,
 ) -> Result<CursorRunResult> {
     let binary =
@@ -174,8 +192,17 @@ pub async fn execute(
     let workspace_text = workspace
         .to_str()
         .context("путь worktree содержит неподдерживаемые символы")?;
-    let bridge = Bridge::spawn(&binary, workspace_text, api_key).await?;
-    let result = execute_inner(&bridge, workspace_text, api_key, prompt).await;
+    std::fs::create_dir_all(state_root).with_context(|| {
+        format!(
+            "не удалось создать каталог состояния Cursor {}",
+            state_root.display()
+        )
+    })?;
+    let state_root_text = state_root
+        .to_str()
+        .context("путь состояния Cursor содержит неподдерживаемые символы")?;
+    let bridge = Bridge::spawn(&binary, workspace_text, api_key, Some(state_root)).await?;
+    let result = execute_inner(&bridge, workspace_text, api_key, state_root_text, prompt).await;
     bridge.shutdown().await;
     result
 }
@@ -184,6 +211,7 @@ async fn execute_inner(
     bridge: &Bridge,
     workspace: &str,
     api_key: &str,
+    state_root: &str,
     prompt: &str,
 ) -> Result<CursorRunResult> {
     let catalog = bridge
@@ -206,6 +234,7 @@ async fn execute_inner(
                     "local": {
                         "cwd": [workspace],
                         "sandboxOptions": { "enabled": false },
+                        "store": { "type": "jsonl", "rootDir": state_root },
                         "autoReview": false
                     }
                 }
@@ -514,6 +543,7 @@ pub async fn probe(
     workspace: &str,
     api_key: Option<&str>,
     preferred_binary: Option<&Path>,
+    state_root: Option<&Path>,
 ) -> ProviderHealth {
     let Some(binary) = bridge_binary(preferred_binary) else {
         return ProviderHealth {
@@ -525,7 +555,7 @@ pub async fn probe(
         };
     };
     let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) else {
-        let detail = match Bridge::spawn(&binary, workspace, "").await {
+        let detail = match Bridge::spawn(&binary, workspace, "", state_root).await {
             Ok(bridge) => {
                 let version = bridge
                     .unary("SdkBridgeControlService", "GetVersion", json!({}))
@@ -555,7 +585,7 @@ pub async fn probe(
         };
     };
 
-    let bridge = match Bridge::spawn(&binary, workspace, api_key).await {
+    let bridge = match Bridge::spawn(&binary, workspace, api_key, state_root).await {
         Ok(bridge) => bridge,
         Err(error) => {
             return ProviderHealth {

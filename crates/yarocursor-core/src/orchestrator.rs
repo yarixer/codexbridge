@@ -84,6 +84,7 @@ pub async fn execute_task(
     cursor_api_key: &str,
     cursor_bridge_binary: Option<&Path>,
     worktree_root: &Path,
+    cursor_state_root: &Path,
 ) -> Result<TaskSession> {
     let task = store.get_task(task_id)?.context("задача не найдена")?;
     let expected = match task.status {
@@ -109,19 +110,27 @@ pub async fn execute_task(
     store.transition(task_id, expected, TaskStatus::Executing, None)?;
     let previous_review = store.load_artifact::<ArchitectReview>(task_id, REVIEW_ARTIFACT)?;
     let prompt = worker_prompt(&task.spec, &plan, previous_review.as_ref())?;
-    let worker =
-        match cursor::execute(&worktree, cursor_api_key, cursor_bridge_binary, &prompt).await {
-            Ok(worker) => worker,
-            Err(error) => {
-                let _ = store.transition(
-                    task_id,
-                    TaskStatus::Executing,
-                    TaskStatus::Blocked,
-                    Some(&error.to_string()),
-                );
-                return Err(error);
-            }
-        };
+    let task_cursor_state_root = cursor_state_root.join(task_id.to_string());
+    let worker = match cursor::execute(
+        &worktree,
+        cursor_api_key,
+        cursor_bridge_binary,
+        &task_cursor_state_root,
+        &prompt,
+    )
+    .await
+    {
+        Ok(worker) => worker,
+        Err(error) => {
+            let _ = store.transition(
+                task_id,
+                TaskStatus::Executing,
+                TaskStatus::Blocked,
+                Some(&error.to_string()),
+            );
+            return Err(error);
+        }
+    };
     store.increment_worker_attempts(task_id)?;
     store.save_artifact(task_id, WORKER_ARTIFACT, &worker)?;
     store.transition(task_id, TaskStatus::Executing, TaskStatus::Validating, None)?;

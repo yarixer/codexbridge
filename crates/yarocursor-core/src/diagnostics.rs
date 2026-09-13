@@ -45,10 +45,16 @@ pub async fn inspect(
     workspace: &str,
     cursor_api_key: Option<&str>,
     cursor_bridge_binary: Option<&Path>,
+    cursor_state_root: Option<&Path>,
 ) -> EnvironmentReport {
     let (codex, cursor) = tokio::join!(
         codex::probe(),
-        cursor::probe(workspace, cursor_api_key, cursor_bridge_binary),
+        cursor::probe(
+            workspace,
+            cursor_api_key,
+            cursor_bridge_binary,
+            cursor_state_root,
+        ),
     );
 
     EnvironmentReport {
