@@ -219,6 +219,37 @@ impl TaskStore {
             .map(|json| serde_json::from_str(&json).context("повреждённый артефакт задачи"))
             .transpose()
     }
+
+    pub fn blocked_from(&self, task_id: Uuid) -> Result<Option<TaskStatus>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let payload = connection
+            .query_row(
+                "SELECT payload_json FROM task_events
+                 WHERE task_id = ?1 AND event_type = 'task.transitioned'
+                 ORDER BY sequence DESC LIMIT 1",
+                [task_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload).context("повреждено событие перехода задачи")?;
+        if payload.get("to").and_then(serde_json::Value::as_str) != Some("blocked") {
+            return Ok(None);
+        }
+        payload
+            .get("from")
+            .cloned()
+            .map(|value| {
+                serde_json::from_value(value).context("неизвестный этап блокировки задачи")
+            })
+            .transpose()
+    }
 }
 
 fn append_event(
@@ -301,6 +332,18 @@ mod tests {
             .transition(task.id, TaskStatus::Draft, TaskStatus::Planning, None)
             .unwrap();
         assert_eq!(planned.status, TaskStatus::Planning);
+        store
+            .transition(
+                task.id,
+                TaskStatus::Planning,
+                TaskStatus::Blocked,
+                Some("ошибка"),
+            )
+            .unwrap();
+        assert_eq!(
+            store.blocked_from(task.id).unwrap(),
+            Some(TaskStatus::Planning)
+        );
         assert!(
             store
                 .transition(task.id, TaskStatus::Draft, TaskStatus::Planning, None)

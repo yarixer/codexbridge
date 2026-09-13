@@ -67,7 +67,10 @@ impl TaskStatus {
                 | (Validating, Reviewing | NeedsRevision | Blocked | Cancelled)
                 | (Reviewing, Completed | NeedsRevision | Blocked | Cancelled)
                 | (NeedsRevision, Executing | Blocked | Cancelled)
-                | (Blocked, Planning | Executing | Cancelled)
+                | (
+                    Blocked,
+                    Planning | Executing | Validating | Reviewing | Cancelled
+                )
         )
     }
 
@@ -128,6 +131,7 @@ mod tests {
         assert!(TaskStatus::Draft.can_transition_to(TaskStatus::Planning));
         assert!(!TaskStatus::Executing.can_transition_to(TaskStatus::Completed));
         assert!(TaskStatus::Reviewing.can_transition_to(TaskStatus::Completed));
+        assert!(TaskStatus::Blocked.can_transition_to(TaskStatus::Validating));
         assert!(!TaskStatus::Completed.can_transition_to(TaskStatus::Executing));
     }
 }

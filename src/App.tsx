@@ -56,6 +56,7 @@ type TaskSession = {
     workerAttempts: number;
     spec: { baseCommit: string; maxWorkerAttempts: number };
   };
+  blockedFrom?: string;
   plan?: { summary: string; workItems: WorkItem[]; risks: string[] };
   worktree?: string;
   worker?: { status: string; text: string; durationMs: number; events: { kind: string; summary: string }[] };
@@ -283,7 +284,13 @@ export default function App() {
                     {((session.task.status === "planning" || session.task.status === "needsRevision") && session.task.workerAttempts < session.task.spec.maxWorkerAttempts || session.task.status === "blocked") && (
                       <button className="primary-action" onClick={executePlan} disabled={!!workflowBusy || readyCount !== 2}>
                         {workflowBusy === "executing" ? <LoaderCircle className="spin" size={18} /> : <Hammer size={18} />}
-                        {workflowBusy === "executing" ? "Grok работает, затем Astra проверит…" : session.task.status === "needsRevision" || session.task.status === "blocked" ? "Повторить запуск Grok" : "Утвердить план и запустить Grok"}
+                        {workflowBusy === "executing"
+                          ? "Выполнение продолжается…"
+                          : session.task.status === "blocked" && (session.blockedFrom === "validating" || session.blockedFrom === "reviewing")
+                            ? "Продолжить проверку"
+                            : session.task.status === "needsRevision" || session.task.status === "blocked"
+                              ? "Повторить запуск Grok"
+                              : "Утвердить план и запустить Grok"}
                       </button>
                     )}
                   </div>

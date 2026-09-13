@@ -36,6 +36,7 @@ pub struct CreateTaskRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TaskSession {
     pub task: Task,
+    pub blocked_from: Option<TaskStatus>,
     pub plan: Option<ArchitectPlan>,
     pub worktree: Option<String>,
     pub worker: Option<CursorRunResult>,
@@ -87,13 +88,16 @@ pub async fn execute_task(
     cursor_state_root: &Path,
 ) -> Result<TaskSession> {
     let task = store.get_task(task_id)?.context("задача не найдена")?;
-    let expected = match task.status {
-        TaskStatus::Planning => TaskStatus::Planning,
-        TaskStatus::NeedsRevision => TaskStatus::NeedsRevision,
-        TaskStatus::Blocked => TaskStatus::Blocked,
+    let start_stage = match task.status {
+        TaskStatus::Planning | TaskStatus::NeedsRevision => TaskStatus::Executing,
+        TaskStatus::Blocked => match store.blocked_from(task_id)? {
+            Some(TaskStatus::Validating) => TaskStatus::Validating,
+            Some(TaskStatus::Reviewing) => TaskStatus::Reviewing,
+            _ => TaskStatus::Executing,
+        },
         status => return Err(anyhow!("задачу в состоянии {status} нельзя запустить")),
     };
-    if task.worker_attempts >= task.spec.max_worker_attempts && expected != TaskStatus::Blocked {
+    if task.worker_attempts >= task.spec.max_worker_attempts && task.status != TaskStatus::Blocked {
         return Err(anyhow!("исчерпан лимит попыток Grok"));
     }
     let plan = store
@@ -107,57 +111,69 @@ pub async fn execute_task(
     )
     .await?;
     store.save_artifact(task_id, WORKTREE_ARTIFACT, &worktree)?;
-    store.transition(task_id, expected, TaskStatus::Executing, None)?;
-    let previous_review = store.load_artifact::<ArchitectReview>(task_id, REVIEW_ARTIFACT)?;
-    let prompt = worker_prompt(&task.spec, &plan, previous_review.as_ref())?;
-    let task_cursor_state_root = cursor_state_root.join(task_id.to_string());
-    let worker = match cursor::execute(
-        &worktree,
-        cursor_api_key,
-        cursor_bridge_binary,
-        &task_cursor_state_root,
-        &prompt,
-    )
-    .await
-    {
-        Ok(worker) => worker,
-        Err(error) => {
-            let _ = store.transition(
-                task_id,
-                TaskStatus::Executing,
-                TaskStatus::Blocked,
-                Some(&error.to_string()),
-            );
-            return Err(error);
-        }
-    };
-    store.increment_worker_attempts(task_id)?;
-    store.save_artifact(task_id, WORKER_ARTIFACT, &worker)?;
-    store.transition(task_id, TaskStatus::Executing, TaskStatus::Validating, None)?;
-    let validation = match validation::run_all(&worktree, &task.spec.validation_commands).await {
-        Ok(validation) => validation,
-        Err(error) => {
-            let _ = store.transition(
-                task_id,
-                TaskStatus::Validating,
-                TaskStatus::Blocked,
-                Some(&error.to_string()),
-            );
-            return Err(error);
-        }
-    };
-    store.save_artifact(task_id, VALIDATION_ARTIFACT, &validation)?;
-    if validation.iter().any(|result| !result.success) {
-        store.transition(
-            task_id,
-            TaskStatus::Validating,
-            TaskStatus::NeedsRevision,
-            Some("одна или несколько команд проверки завершились ошибкой"),
-        )?;
-        return load_session(store, task_id);
+    if start_stage == TaskStatus::Executing {
+        store.transition(task_id, task.status, TaskStatus::Executing, None)?;
+        let previous_review = store.load_artifact::<ArchitectReview>(task_id, REVIEW_ARTIFACT)?;
+        let prompt = worker_prompt(&task.spec, &plan, previous_review.as_ref())?;
+        let task_cursor_state_root = cursor_state_root.join(task_id.to_string());
+        let worker = match cursor::execute(
+            &worktree,
+            cursor_api_key,
+            cursor_bridge_binary,
+            &task_cursor_state_root,
+            &prompt,
+        )
+        .await
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = store.transition(
+                    task_id,
+                    TaskStatus::Executing,
+                    TaskStatus::Blocked,
+                    Some(&error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+        store.increment_worker_attempts(task_id)?;
+        store.save_artifact(task_id, WORKER_ARTIFACT, &worker)?;
+        store.transition(task_id, TaskStatus::Executing, TaskStatus::Validating, None)?;
+    } else {
+        store.transition(task_id, TaskStatus::Blocked, start_stage, None)?;
     }
 
-    store.transition(task_id, TaskStatus::Validating, TaskStatus::Reviewing, None)?;
+    let validation = if start_stage == TaskStatus::Reviewing {
+        store
+            .load_artifact::<Vec<ValidationResult>>(task_id, VALIDATION_ARTIFACT)?
+            .context("результаты проверки не найдены")?
+    } else {
+        let validation = match validation::run_all(&worktree, &task.spec.validation_commands).await
+        {
+            Ok(validation) => validation,
+            Err(error) => {
+                let _ = store.transition(
+                    task_id,
+                    TaskStatus::Validating,
+                    TaskStatus::Blocked,
+                    Some(&error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+        store.save_artifact(task_id, VALIDATION_ARTIFACT, &validation)?;
+        if validation.iter().any(|result| !result.success) {
+            store.transition(
+                task_id,
+                TaskStatus::Validating,
+                TaskStatus::NeedsRevision,
+                Some("одна или несколько команд проверки завершились ошибкой"),
+            )?;
+            return load_session(store, task_id);
+        }
+        store.transition(task_id, TaskStatus::Validating, TaskStatus::Reviewing, None)?;
+        validation
+    };
     let diff = match git::diff(&worktree).await {
         Ok(diff) => diff,
         Err(error) => {
@@ -220,8 +236,15 @@ pub async fn execute_task(
 }
 
 pub fn load_session(store: &TaskStore, task_id: Uuid) -> Result<TaskSession> {
+    let task = store.get_task(task_id)?.context("задача не найдена")?;
+    let blocked_from = if task.status == TaskStatus::Blocked {
+        store.blocked_from(task_id)?
+    } else {
+        None
+    };
     Ok(TaskSession {
-        task: store.get_task(task_id)?.context("задача не найдена")?,
+        task,
+        blocked_from,
         plan: store.load_artifact(task_id, PLAN_ARTIFACT)?,
         worktree: store
             .load_artifact::<PathBuf>(task_id, WORKTREE_ARTIFACT)?
