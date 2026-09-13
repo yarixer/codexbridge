@@ -8,10 +8,14 @@ import {
   ChevronRight,
   CircleAlert,
   FolderGit2,
+  GitBranch,
+  Hammer,
   KeyRound,
+  ListChecks,
   LoaderCircle,
   Play,
   Settings2,
+  ShieldCheck,
   TerminalSquare,
 } from "lucide-react";
 
@@ -35,6 +39,28 @@ type EnvironmentReport = {
   codex: ProviderHealth;
   cursor: ProviderHealth;
   workspace: string;
+};
+
+type WorkItem = {
+  id: string;
+  objective: string;
+  allowedPaths: string[];
+  dependsOn: string[];
+  acceptanceCriteria: string[];
+};
+
+type TaskSession = {
+  task: {
+    id: string;
+    status: string;
+    workerAttempts: number;
+    spec: { baseCommit: string };
+  };
+  plan?: { summary: string; workItems: WorkItem[]; risks: string[] };
+  worktree?: string;
+  worker?: { status: string; text: string; durationMs: number; events: { kind: string; summary: string }[] };
+  validation: { command: string[]; success: boolean; exitCode?: number; output: string }[];
+  review?: { approved: boolean; summary: string; issues: string[] };
 };
 
 const initialWorkspace = "D:\\programming\\yarocodex";
@@ -64,6 +90,12 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [loginStarted, setLoginStarted] = useState(false);
   const [error, setError] = useState<string>();
+  const [goal, setGoal] = useState("");
+  const [constraints, setConstraints] = useState("");
+  const [acceptance, setAcceptance] = useState("");
+  const [validationCommands, setValidationCommands] = useState("cargo test --workspace\nnpm run build");
+  const [session, setSession] = useState<TaskSession>();
+  const [workflowBusy, setWorkflowBusy] = useState<"planning" | "executing">();
 
   const readyCount = useMemo(
     () => [report?.codex.state, report?.cursor.state].filter((state) => state === "ready").length,
@@ -76,10 +108,54 @@ export default function App() {
     try {
       await invoke("set_cursor_api_key", { value: cursorKey });
       setReport(await invoke<EnvironmentReport>("inspect_environment", { workspace }));
+      setLoginStarted(false);
     } catch (reason) {
       setError(String(reason));
     } finally {
       setBusy(false);
+    }
+  }
+
+  function nonEmptyLines(value: string) {
+    return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+
+  function commandArgs(value: string) {
+    return nonEmptyLines(value).map((line) =>
+      Array.from(line.matchAll(/"([^"]*)"|'([^']*)'|([^\s]+)/g), (match) => match[1] ?? match[2] ?? match[3]),
+    );
+  }
+
+  async function createPlan() {
+    setError(undefined);
+    setWorkflowBusy("planning");
+    setSession(undefined);
+    try {
+      const request = {
+        goal: goal.trim(),
+        workspace,
+        constraints: nonEmptyLines(constraints),
+        acceptanceCriteria: nonEmptyLines(acceptance),
+        validationCommands: commandArgs(validationCommands),
+      };
+      setSession(await invoke<TaskSession>("create_task_plan", { request }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkflowBusy(undefined);
+    }
+  }
+
+  async function executePlan() {
+    if (!session) return;
+    setError(undefined);
+    setWorkflowBusy("executing");
+    try {
+      setSession(await invoke<TaskSession>("execute_task", { taskId: session.task.id }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkflowBusy(undefined);
     }
   }
 
@@ -104,7 +180,7 @@ export default function App() {
           <button className="nav-button" title="Запуски"><Play size={20} /></button>
           <button className="nav-button" title="Настройки"><Settings2 size={20} /></button>
         </nav>
-        <div className="version">v0.1</div>
+        <div className="version">v0.2</div>
       </aside>
 
       <main>
@@ -146,6 +222,81 @@ export default function App() {
               {busy ? <LoaderCircle className="spin" size={18} /> : <Activity size={18} />}
               {busy ? "Проверяю…" : "Запустить диагностику"}
             </button>
+
+            {readyCount === 2 && (
+              <section className="workflow">
+                <div className="section-heading">
+                  <span className="step-number">01</span>
+                  <div><span className="eyebrow">ORCHESTRATION</span><h3>Новая задача</h3></div>
+                </div>
+
+                <label>
+                  <span>Цель</span>
+                  <textarea rows={4} placeholder="Что нужно реализовать или исправить?" value={goal} onChange={(event) => setGoal(event.target.value)} />
+                </label>
+                <div className="two-columns">
+                  <label>
+                    <span>Ограничения · по одному на строку</span>
+                    <textarea rows={4} placeholder="Не менять публичный API" value={constraints} onChange={(event) => setConstraints(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>Критерии приёмки · по одному на строку</span>
+                    <textarea rows={4} placeholder="Все тесты проходят" value={acceptance} onChange={(event) => setAcceptance(event.target.value)} />
+                  </label>
+                </div>
+                <label>
+                  <span>Команды проверки · по одной на строку</span>
+                  <textarea className="mono" rows={3} value={validationCommands} onChange={(event) => setValidationCommands(event.target.value)} />
+                </label>
+
+                <button className="secondary-action" onClick={createPlan} disabled={!goal.trim() || !!workflowBusy}>
+                  {workflowBusy === "planning" ? <LoaderCircle className="spin" size={18} /> : <BrainCircuit size={18} />}
+                  {workflowBusy === "planning" ? "Astra изучает проект…" : "Составить план с Astra"}
+                </button>
+
+                {session?.plan && (
+                  <div className="plan-card">
+                    <div className="result-heading"><BrainCircuit size={19} /><div><span className="eyebrow">ASTRA PLAN</span><strong>{session.plan.summary}</strong></div></div>
+                    <div className="commit-line"><GitBranch size={14} /> base {session.task.spec.baseCommit.slice(0, 10)}</div>
+                    <ol className="work-items">
+                      {session.plan.workItems.map((item) => (
+                        <li key={item.id}><span>{item.id}</span><div><strong>{item.objective}</strong><small>{item.allowedPaths.join(" · ") || "весь worktree"}</small></div></li>
+                      ))}
+                    </ol>
+                    {session.plan.risks.length > 0 && <p className="risk-line">Риски: {session.plan.risks.join(" · ")}</p>}
+                    {(session.task.status === "planning" || session.task.status === "needsRevision") && (
+                      <button className="primary-action" onClick={executePlan} disabled={!!workflowBusy}>
+                        {workflowBusy === "executing" ? <LoaderCircle className="spin" size={18} /> : <Hammer size={18} />}
+                        {workflowBusy === "executing" ? "Grok работает, затем Astra проверит…" : session.task.status === "needsRevision" ? "Отправить Grok на исправление" : "Утвердить план и запустить Grok"}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {session?.worker && (
+                  <div className="result-card">
+                    <div className="result-heading"><Hammer size={19} /><div><span className="eyebrow">GROK RESULT</span><strong>{session.worker.status}</strong></div></div>
+                    <p>{session.worker.text || "Исполнитель завершил работу без итогового сообщения."}</p>
+                    {session.worktree && <code>{session.worktree}</code>}
+                  </div>
+                )}
+
+                {session && session.validation.length > 0 && (
+                  <div className="result-card">
+                    <div className="result-heading"><ListChecks size={19} /><div><span className="eyebrow">VALIDATION</span><strong>{session.validation.every((item) => item.success) ? "Все проверки прошли" : "Нужны исправления"}</strong></div></div>
+                    {session.validation.map((item) => <div className={`check-row ${item.success ? "pass" : "fail"}`} key={item.command.join(" ")}><span>{item.success ? "PASS" : "FAIL"}</span><code>{item.command.join(" ")}</code></div>)}
+                  </div>
+                )}
+
+                {session?.review && (
+                  <div className="result-card">
+                    <div className="result-heading"><ShieldCheck size={19} /><div><span className="eyebrow">ASTRA REVIEW</span><strong>{session.review.approved ? "Одобрено" : "Нужна доработка"}</strong></div></div>
+                    <p>{session.review.summary}</p>
+                    {session.review.issues.map((issue) => <div className="review-issue" key={issue}>{issue}</div>)}
+                  </div>
+                )}
+              </section>
+            )}
           </div>
 
           <aside className="settings-panel">

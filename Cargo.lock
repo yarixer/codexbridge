@@ -5347,7 +5347,7 @@ dependencies = [
 
 [[package]]
 name = "yarocursor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "secrecy",
  "serde",
@@ -5355,12 +5355,13 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "uuid",
  "yarocursor-core",
 ]
 
 [[package]]
 name = "yarocursor-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "reqwest",

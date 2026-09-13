@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::task::{Task, TaskSpec, TaskStatus};
@@ -36,7 +37,14 @@ impl TaskStore {
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS task_events_task_sequence
-                ON task_events(task_id, sequence);",
+                ON task_events(task_id, sequence);
+            CREATE TABLE IF NOT EXISTS task_artifacts (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                artifact_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (task_id, artifact_type)
+            );",
         )?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -146,6 +154,71 @@ impl TaskStore {
         self.get_task(id)?
             .context("задача исчезла после обновления")
     }
+
+    pub fn increment_worker_attempts(&self, id: Uuid) -> Result<Task> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let now = now_unix();
+        let changed = connection.execute(
+            "UPDATE tasks SET worker_attempts = worker_attempts + 1, updated_at = ?1 WHERE id = ?2",
+            params![now, id.to_string()],
+        )?;
+        if changed != 1 {
+            bail!("задача не существует")
+        }
+        drop(connection);
+        self.get_task(id)?
+            .context("задача исчезла после обновления")
+    }
+
+    pub fn save_artifact<T: Serialize>(
+        &self,
+        task_id: Uuid,
+        artifact_type: &str,
+        value: &T,
+    ) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        connection.execute(
+            "INSERT INTO task_artifacts (task_id, artifact_type, payload_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(task_id, artifact_type) DO UPDATE SET
+               payload_json = excluded.payload_json,
+               created_at = excluded.created_at",
+            params![
+                task_id.to_string(),
+                artifact_type,
+                serde_json::to_string(value)?,
+                now_unix()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_artifact<T: DeserializeOwned>(
+        &self,
+        task_id: Uuid,
+        artifact_type: &str,
+    ) -> Result<Option<T>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let payload = connection
+            .query_row(
+                "SELECT payload_json FROM task_artifacts WHERE task_id = ?1 AND artifact_type = ?2",
+                params![task_id.to_string(), artifact_type],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        payload
+            .map(|json| serde_json::from_str(&json).context("повреждённый артефакт задачи"))
+            .transpose()
+    }
 }
 
 fn append_event(
@@ -234,5 +307,15 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.list_tasks().unwrap().len(), 1);
+
+        store
+            .save_artifact(task.id, "answer", &serde_json::json!({ "ok": true }))
+            .unwrap();
+        assert_eq!(
+            store
+                .load_artifact::<serde_json::Value>(task.id, "answer")
+                .unwrap(),
+            Some(serde_json::json!({ "ok": true }))
+        );
     }
 }

@@ -6,7 +6,7 @@ Yarocursor is a small desktop control plane for an opinionated two-agent workflo
 - Cursor Grok 4.6 executes coding tasks through Cursor SDK Bridge.
 - The Rust orchestrator owns state, Git isolation, validation, retries, and budgets.
 
-The project is at milestone 0: provider discovery and account diagnostics. The UI already verifies the local Codex session, Astra availability, Cursor Bridge connectivity, the Cursor model catalog, and ChatGPT rate-limit data.
+The project is at milestone 1: a first end-to-end local orchestration loop. The UI verifies both providers, accepts a task, asks Astra for a structured read-only plan, waits for explicit user approval, runs Grok 4.6 xHigh Fast in an isolated Git worktree, executes validation commands, and sends the resulting diff to Astra for a read-only verdict. Task state and artifacts are persisted in SQLite under the application data directory.
 
 ## Prerequisites
 
@@ -40,13 +40,18 @@ npm install
 npm run tauri dev
 ```
 
-The Cursor key entered in the milestone-0 UI lives only in process memory and is cleared when the app exits. You can also run the terminal diagnostic with `CURSOR_API_KEY` already set:
+The Cursor key entered in the UI lives only in process memory and is cleared when the app exits. You can also run the terminal diagnostic with `CURSOR_API_KEY` already set:
 
 ```text
 cargo run -p yarocursor-core --bin yarocursor-doctor -- /path/to/project
 ```
 
+The Astra planning path has a small CLI smoke test:
+
+```text
+cargo run -p yarocursor-core --bin yarocursor-plan -- /path/to/project "Describe the requested change"
+```
+
 ## Current security boundary
 
-The Astra path is configured as a read-only role in the workflow design. The first milestone only performs account and model discovery; it does not start a model turn or modify project files. Worker sandboxing and worktree enforcement arrive with the execution loop before Grok is allowed to edit a project.
-
+Astra runs with Codex App Server's `readOnly` sandbox and never receives write access. Grok runs through Cursor's local-agent sandbox inside a detached Git worktree created from the recorded base commit. Validation commands are launched directly from argument arrays without a shell. The original checkout is not used as the worker directory; completed worktrees remain available for inspection and manual integration.

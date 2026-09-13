@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -17,6 +18,7 @@ use tokio::{
 };
 
 use crate::diagnostics::{HealthState, ModelCapability, ProviderHealth};
+use crate::task::{ArchitectPlan, TaskSpec};
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
@@ -262,6 +264,230 @@ pub async fn begin_chatgpt_login() -> Result<(CodexClient, String)> {
         .context("Codex не вернул authUrl")?
         .to_owned();
     Ok((client, url))
+}
+
+pub async fn plan_task(spec: &TaskSpec) -> Result<ArchitectPlan> {
+    let prompt = format!(
+        "Ты архитектор Yarocursor. Изучи репозиторий только для чтения и составь точный план для одного coding-агента Cursor. Не изменяй файлы и не пиши реализацию. План должен быть достаточно конкретным, чтобы исполнитель мог работать автономно.\n\nЦель:\n{}\n\nОграничения:\n{}\n\nКритерии приёмки:\n{}\n\nКоманды проверки:\n{}",
+        spec.goal,
+        display_lines(&spec.constraints),
+        display_lines(&spec.acceptance_criteria),
+        spec.validation_commands
+            .iter()
+            .map(|command| command.join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    structured_turn(&spec.workspace, &prompt, architect_plan_schema()).await
+}
+
+pub async fn review_task(
+    workspace: &str,
+    spec: &TaskSpec,
+    plan: &ArchitectPlan,
+    diff: &str,
+    validation_summary: &str,
+) -> Result<ArchitectReview> {
+    let prompt = format!(
+        "Ты финальный ревьюер Yarocursor. Проверь реализацию относительно цели, плана и критериев приёмки. Работай только для чтения. Не исправляй код. Одобряй только если нет блокирующих ошибок.\n\nЦель:\n{}\n\nПлан:\n{}\n\nРезультаты проверок:\n{}\n\nGit diff:\n{}",
+        spec.goal,
+        serde_json::to_string_pretty(plan)?,
+        validation_summary,
+        truncate(diff, 120_000)
+    );
+    structured_turn(workspace, &prompt, architect_review_schema()).await
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchitectReview {
+    pub approved: bool,
+    pub summary: String,
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
+async fn structured_turn<T: DeserializeOwned>(
+    workspace: &str,
+    prompt: &str,
+    output_schema: Value,
+) -> Result<T> {
+    let client = CodexClient::spawn().await?;
+    let result = structured_turn_inner(&client, workspace, prompt, output_schema).await;
+    client.shutdown().await;
+    result
+}
+
+async fn structured_turn_inner<T: DeserializeOwned>(
+    client: &CodexClient,
+    workspace: &str,
+    prompt: &str,
+    output_schema: Value,
+) -> Result<T> {
+    let thread = client
+        .request(
+            "thread/start",
+            json!({
+                "model": "gpt-6-astra",
+                "cwd": workspace,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "serviceName": "yarocursor"
+            }),
+        )
+        .await?;
+    let thread_id = thread
+        .pointer("/thread/id")
+        .and_then(Value::as_str)
+        .context("Codex не вернул thread.id")?
+        .to_owned();
+    let mut notifications = client.subscribe();
+    let turn = client
+        .request(
+            "turn/start",
+            json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": prompt }],
+                "cwd": workspace,
+                "approvalPolicy": "never",
+                "sandboxPolicy": {
+                    "type": "readOnly",
+                    "access": { "type": "fullAccess" }
+                },
+                "model": "gpt-6-astra",
+                "effort": "high",
+                "summary": "concise",
+                "outputSchema": output_schema
+            }),
+        )
+        .await?;
+    let turn_id = turn
+        .pointer("/turn/id")
+        .and_then(Value::as_str)
+        .context("Codex не вернул turn.id")?
+        .to_owned();
+
+    let wait_for_result = async {
+        let mut final_text = None;
+        loop {
+            let notification = notifications
+                .recv()
+                .await
+                .context("канал событий Codex закрыт")?;
+            let method = notification.get("method").and_then(Value::as_str);
+            if method == Some("item/completed") {
+                let item = notification.pointer("/params/item");
+                if item
+                    .and_then(|value| value.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("agentMessage")
+                {
+                    final_text = item
+                        .and_then(|value| value.get("text"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
+                }
+            }
+            if method != Some("turn/completed") {
+                continue;
+            }
+            let completed_turn = notification.pointer("/params/turn");
+            if completed_turn
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                != Some(&turn_id)
+            {
+                continue;
+            }
+            let status = completed_turn
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("failed");
+            if status != "completed" {
+                let message = completed_turn
+                    .and_then(|value| value.pointer("/error/message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("ход Astra завершился с ошибкой");
+                return Err(anyhow!(message.to_owned()));
+            }
+            let text = final_text.context("Astra не вернула структурированный ответ")?;
+            return serde_json::from_str::<T>(strip_json_fence(&text))
+                .context("не удалось разобрать структурированный ответ Astra");
+        }
+    };
+
+    let result = timeout(Duration::from_secs(900), wait_for_result)
+        .await
+        .context("таймаут хода Astra")?;
+    let _ = client
+        .request("thread/delete", json!({ "threadId": thread_id }))
+        .await;
+    result
+}
+
+fn architect_plan_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" },
+            "workItems": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "objective": { "type": "string" },
+                        "allowedPaths": { "type": "array", "items": { "type": "string" } },
+                        "dependsOn": { "type": "array", "items": { "type": "string" } },
+                        "acceptanceCriteria": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["id", "objective", "allowedPaths", "dependsOn", "acceptanceCriteria"],
+                    "additionalProperties": false
+                }
+            },
+            "risks": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["summary", "workItems", "risks"],
+        "additionalProperties": false
+    })
+}
+
+fn architect_review_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "approved": { "type": "boolean" },
+            "summary": { "type": "string" },
+            "issues": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["approved", "summary", "issues"],
+        "additionalProperties": false
+    })
+}
+
+fn display_lines(lines: &[String]) -> String {
+    if lines.is_empty() {
+        "—".into()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn truncate(value: &str, max_chars: usize) -> &str {
+    value
+        .char_indices()
+        .nth(max_chars)
+        .map_or(value, |(index, _)| &value[..index])
+}
+
+fn strip_json_fence(value: &str) -> &str {
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .and_then(|inner| inner.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed)
 }
 
 fn chatgpt_account_type(account_read: &Value) -> Option<&str> {

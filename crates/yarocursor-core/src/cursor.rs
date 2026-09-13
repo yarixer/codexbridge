@@ -4,8 +4,8 @@ use std::{
     process::Stdio,
 };
 
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
@@ -105,6 +105,33 @@ impl Bridge {
         Ok(body)
     }
 
+    async fn server_stream(&self, service: &str, method: &str, body: Value) -> Result<Vec<Value>> {
+        let payload = serde_json::to_vec(&body)?;
+        let length = u32::try_from(payload.len()).context("слишком большой запрос Cursor")?;
+        let mut framed = Vec::with_capacity(payload.len() + 5);
+        framed.push(0);
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(&payload);
+        let response = reqwest::Client::new()
+            .post(format!("{}/sdk.v1.{service}/{method}", self.base_url))
+            .bearer_auth(&self.token)
+            .header("Connect-Protocol-Version", "1")
+            .header("Content-Type", "application/connect+json")
+            .body(framed)
+            .send()
+            .await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if !status.is_success() {
+            bail!(
+                "Cursor Bridge {}: {}",
+                status,
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        decode_connect_json_stream(&bytes)
+    }
+
     async fn shutdown(mut self) {
         let _ = self
             .unary("SdkBridgeControlService", "Shutdown", json!({}))
@@ -115,6 +142,340 @@ impl Bridge {
         {
             let _ = self.child.kill().await;
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorRunResult {
+    pub agent_id: String,
+    pub run_id: String,
+    pub status: String,
+    pub text: String,
+    pub duration_ms: u64,
+    pub events: Vec<CursorRunEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorRunEvent {
+    pub kind: String,
+    pub summary: String,
+}
+
+pub async fn execute(
+    workspace: &Path,
+    api_key: &str,
+    preferred_binary: Option<&Path>,
+    prompt: &str,
+) -> Result<CursorRunResult> {
+    let binary =
+        bridge_binary(preferred_binary).context("Cursor SDK Bridge не установлен или не найден")?;
+    let workspace_text = workspace
+        .to_str()
+        .context("путь worktree содержит неподдерживаемые символы")?;
+    let bridge = Bridge::spawn(&binary, workspace_text, api_key).await?;
+    let result = execute_inner(&bridge, workspace_text, api_key, prompt).await;
+    bridge.shutdown().await;
+    result
+}
+
+async fn execute_inner(
+    bridge: &Bridge,
+    workspace: &str,
+    api_key: &str,
+    prompt: &str,
+) -> Result<CursorRunResult> {
+    let catalog = bridge
+        .unary(
+            "SdkCursorService",
+            "ListModels",
+            json!({ "options": { "apiKey": api_key } }),
+        )
+        .await?;
+    let model = grok_model_selection(&catalog)?;
+    let created = bridge
+        .unary(
+            "SdkAgentService",
+            "CreateAgent",
+            json!({
+                "options": {
+                    "model": model,
+                    "apiKey": api_key,
+                    "name": "Yarocursor worker",
+                    "local": {
+                        "cwd": [workspace],
+                        "sandboxOptions": { "enabled": true },
+                        "autoReview": false
+                    }
+                }
+            }),
+        )
+        .await?;
+    let agent_id = created
+        .get("agentId")
+        .and_then(Value::as_str)
+        .context("Cursor не вернул agentId")?
+        .to_owned();
+    let streamed = bridge
+        .server_stream(
+            "SdkAgentService",
+            "Send",
+            json!({
+                "agentId": agent_id,
+                "message": { "text": prompt },
+                "options": { "enableDeltas": false, "enableSteps": false }
+            }),
+        )
+        .await;
+    let _ = bridge
+        .unary(
+            "SdkAgentService",
+            "CloseAgent",
+            json!({ "agentId": agent_id }),
+        )
+        .await;
+    parse_cursor_run(&agent_id, streamed?)
+}
+
+fn grok_model_selection(catalog: &Value) -> Result<Value> {
+    let model = catalog
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some("grok-4.6"))
+        })
+        .context("grok-4.6 отсутствует в каталоге Cursor")?;
+    let mut params = model
+        .get("variants")
+        .and_then(Value::as_array)
+        .and_then(|variants| {
+            variants.iter().find(|variant| {
+                variant
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.to_ascii_lowercase().contains("fast"))
+            })
+        })
+        .and_then(|variant| variant.get("params"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let definitions = model
+        .get("parameters")
+        .and_then(Value::as_array)
+        .context("grok-4.6 не содержит параметры модели")?;
+    let effort_id = definitions
+        .iter()
+        .find(|parameter| has_parameter_value(parameter, "xhigh"))
+        .and_then(|parameter| parameter.get("id"))
+        .and_then(Value::as_str)
+        .context("grok-4.6 не поддерживает xhigh")?;
+    upsert_model_parameter(&mut params, effort_id, "xhigh");
+
+    if let Some(fast_id) = definitions
+        .iter()
+        .find(|parameter| {
+            has_parameter_value(parameter, "true") && parameter_id_contains(parameter, "fast")
+        })
+        .and_then(|parameter| parameter.get("id"))
+        .and_then(Value::as_str)
+    {
+        upsert_model_parameter(&mut params, fast_id, "true");
+    }
+    let has_fast = params.iter().any(|parameter| {
+        parameter
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.to_ascii_lowercase().contains("fast"))
+            && parameter.get("value").and_then(Value::as_str) == Some("true")
+    }) || model
+        .get("variants")
+        .and_then(Value::as_array)
+        .is_some_and(|variants| {
+            variants.iter().any(|variant| {
+                variant
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.to_ascii_lowercase().contains("fast"))
+                    && variant.get("params").and_then(Value::as_array).is_some_and(
+                        |variant_params| variant_params.iter().all(|value| params.contains(value)),
+                    )
+            })
+        });
+    if !has_fast {
+        bail!("grok-4.6 не содержит конфигурацию Fast")
+    }
+    Ok(json!({ "id": "grok-4.6", "params": params }))
+}
+
+fn has_parameter_value(parameter: &Value, expected: &str) -> bool {
+    parameter
+        .get("values")
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| value.get("value").and_then(Value::as_str) == Some(expected))
+        })
+}
+
+fn parameter_id_contains(parameter: &Value, expected: &str) -> bool {
+    parameter
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.to_ascii_lowercase().contains(expected))
+}
+
+fn upsert_model_parameter(params: &mut Vec<Value>, id: &str, value: &str) {
+    params.retain(|parameter| parameter.get("id").and_then(Value::as_str) != Some(id));
+    params.push(json!({ "id": id, "value": value }));
+}
+
+fn decode_connect_json_stream(bytes: &[u8]) -> Result<Vec<Value>> {
+    let mut cursor = 0usize;
+    let mut messages = Vec::new();
+    let mut saw_end = false;
+    while cursor < bytes.len() {
+        if bytes.len() - cursor < 5 {
+            bail!("Cursor stream содержит неполный заголовок frame")
+        }
+        let flags = bytes[cursor];
+        let length = u32::from_be_bytes([
+            bytes[cursor + 1],
+            bytes[cursor + 2],
+            bytes[cursor + 3],
+            bytes[cursor + 4],
+        ]) as usize;
+        cursor += 5;
+        let end = cursor
+            .checked_add(length)
+            .filter(|end| *end <= bytes.len())
+            .context("Cursor stream содержит неполный frame")?;
+        let payload = &bytes[cursor..end];
+        cursor = end;
+        if flags & 0x01 != 0 {
+            bail!("сжатые Cursor stream frames пока не поддерживаются")
+        }
+        let value = if payload.is_empty() {
+            json!({})
+        } else {
+            serde_json::from_slice::<Value>(payload).context("неверный JSON в Cursor stream")?
+        };
+        if flags & 0x02 != 0 {
+            saw_end = true;
+            if let Some(error) = value.get("error") {
+                bail!("Cursor stream: {error}")
+            }
+            break;
+        }
+        messages.push(value);
+    }
+    if !saw_end {
+        bail!("Cursor stream завершился без EndStreamResponse")
+    }
+    Ok(messages)
+}
+
+fn parse_cursor_run(agent_id: &str, messages: Vec<Value>) -> Result<CursorRunResult> {
+    let mut events = Vec::new();
+    let mut last_status_message = None;
+    let mut terminal = None;
+    for message in &messages {
+        if let Some(sdk_message) = message.get("sdkMessage") {
+            let kind = sdk_message
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned();
+            let payload = sdk_message.get("message").cloned().unwrap_or(Value::Null);
+            let summary = summarize_cursor_event(&kind, &payload);
+            if kind == "status"
+                && let Some(value) = payload.get("message").and_then(Value::as_str)
+            {
+                last_status_message = Some(value.to_owned());
+            }
+            events.push(CursorRunEvent { kind, summary });
+        }
+        if let Some(result) = message.get("result") {
+            terminal = Some(result);
+        }
+    }
+    let terminal = terminal.context("Cursor stream не вернул terminal result")?;
+    let result = terminal.get("result").unwrap_or(terminal);
+    let status = result
+        .get("status")
+        .or_else(|| terminal.get("status"))
+        .map(value_to_string)
+        .unwrap_or_else(|| "unknown".into());
+    if !status.to_ascii_lowercase().contains("finished") && status != "3" {
+        return Err(anyhow!(
+            "Grok завершил run со статусом {status}: {}",
+            last_status_message.unwrap_or_else(|| "без описания ошибки".into())
+        ));
+    }
+    Ok(CursorRunResult {
+        agent_id: terminal
+            .get("agentId")
+            .or_else(|| result.get("agentId"))
+            .and_then(Value::as_str)
+            .unwrap_or(agent_id)
+            .to_owned(),
+        run_id: terminal
+            .get("runId")
+            .or_else(|| result.get("runId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        status,
+        text: result
+            .get("result")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        duration_ms: result
+            .get("durationMs")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        events,
+    })
+}
+
+fn value_to_string(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn summarize_cursor_event(kind: &str, payload: &Value) -> String {
+    match kind {
+        "tool_call" => payload
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_owned(),
+        "status" => payload
+            .get("message")
+            .or_else(|| payload.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("status")
+            .to_owned(),
+        "assistant" => payload
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default(),
+        _ => kind.to_owned(),
     }
 }
 
@@ -362,5 +723,63 @@ mod tests {
         };
 
         assert!(!has_xhigh_fast(&model));
+    }
+
+    #[test]
+    fn decodes_connect_json_frames() {
+        fn frame(flags: u8, value: Value) -> Vec<u8> {
+            let payload = serde_json::to_vec(&value).unwrap();
+            let mut result = vec![flags];
+            result.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            result.extend(payload);
+            result
+        }
+        let mut stream = frame(0, json!({ "sdkMessage": { "type": "system" } }));
+        stream.extend(frame(2, json!({})));
+
+        let decoded = decode_connect_json_stream(&stream).unwrap();
+
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(
+            decoded[0]
+                .pointer("/sdkMessage/type")
+                .and_then(Value::as_str),
+            Some("system")
+        );
+    }
+
+    #[test]
+    fn selects_xhigh_fast_variant() {
+        let catalog = json!({
+            "items": [{
+                "id": "grok-4.6",
+                "parameters": [
+                    { "id": "effort", "values": [{ "value": "low" }, { "value": "xhigh" }] }
+                ],
+                "variants": [{
+                    "displayName": "Fast",
+                    "params": [{ "id": "fast", "value": "true" }]
+                }]
+            }]
+        });
+
+        let selection = grok_model_selection(&catalog).unwrap();
+
+        assert_eq!(
+            selection.get("id").and_then(Value::as_str),
+            Some("grok-4.6")
+        );
+        assert!(
+            selection["params"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({ "id": "effort", "value": "xhigh" }))
+        );
+        assert!(
+            selection["params"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({ "id": "fast", "value": "true" }))
+        );
     }
 }
