@@ -44,6 +44,11 @@ impl TaskStore {
                 payload_json TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (task_id, artifact_type)
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )?;
         Ok(Self {
@@ -250,6 +255,32 @@ impl TaskStore {
             })
             .transpose()
     }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        connection
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, now_unix()],
+        )?;
+        Ok(())
+    }
 }
 
 fn append_event(
@@ -350,6 +381,13 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.list_tasks().unwrap().len(), 1);
+
+        assert_eq!(store.get_setting("workspace").unwrap(), None);
+        store.set_setting("workspace", "C:/repo").unwrap();
+        assert_eq!(
+            store.get_setting("workspace").unwrap().as_deref(),
+            Some("C:/repo")
+        );
 
         store
             .save_artifact(task.id, "answer", &serde_json::json!({ "ok": true }))

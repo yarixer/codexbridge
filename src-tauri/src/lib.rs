@@ -1,3 +1,5 @@
+mod credentials;
+
 use std::{collections::HashSet, path::PathBuf, sync::RwLock};
 
 use secrecy::{ExposeSecret, SecretString};
@@ -6,8 +8,19 @@ use tauri_plugin_opener::OpenerExt;
 use uuid::Uuid;
 use yarocursor_core::store::TaskStore;
 
+const WORKSPACE_SETTING: &str = "workspace";
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSettings {
+    workspace: String,
+    theme: String,
+}
+
 struct AppState {
     cursor_api_key: RwLock<Option<SecretString>>,
+    cursor_credential_store: Option<credentials::CursorCredentialStore>,
+    credential_error: RwLock<Option<String>>,
     codex_login: tokio::sync::Mutex<Option<yarocursor_core::codex::CodexClient>>,
     cursor_bridge_binary: Option<PathBuf>,
     task_store: TaskStore,
@@ -18,13 +31,18 @@ struct AppState {
 
 impl AppState {
     fn new(
+        cursor_api_key: Option<SecretString>,
+        cursor_credential_store: Option<credentials::CursorCredentialStore>,
+        credential_error: Option<String>,
         cursor_bridge_binary: Option<PathBuf>,
         task_store: TaskStore,
         worktree_root: PathBuf,
         cursor_state_root: PathBuf,
     ) -> Self {
         Self {
-            cursor_api_key: RwLock::new(None),
+            cursor_api_key: RwLock::new(cursor_api_key),
+            cursor_credential_store,
+            credential_error: RwLock::new(credential_error),
             codex_login: tokio::sync::Mutex::new(None),
             cursor_bridge_binary,
             task_store,
@@ -36,14 +54,116 @@ impl AppState {
 }
 
 #[tauri::command]
-fn set_cursor_api_key(value: String, state: State<'_, AppState>) -> Result<(), String> {
+fn cursor_credential_status(
+    state: State<'_, AppState>,
+) -> Result<credentials::CredentialStatus, String> {
+    credential_status(&state)
+}
+
+#[tauri::command]
+fn set_cursor_api_key(
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<credentials::CredentialStatus, String> {
     let value = value.trim().to_owned();
+    if value.is_empty() {
+        return credential_status(&state);
+    }
+    let store = state.cursor_credential_store.as_ref().ok_or_else(|| {
+        state
+            .credential_error
+            .read()
+            .ok()
+            .and_then(|error| error.clone())
+            .unwrap_or_else(|| "Системное хранилище секретов недоступно".into())
+    })?;
+    store.save(&value)?;
     let mut key = state
         .cursor_api_key
         .write()
         .map_err(|_| "Не удалось заблокировать настройки")?;
-    *key = (!value.is_empty()).then(|| SecretString::from(value));
-    Ok(())
+    *key = Some(SecretString::from(value));
+    drop(key);
+    *state
+        .credential_error
+        .write()
+        .map_err(|_| "Не удалось обновить состояние хранилища")? = None;
+    credential_status(&state)
+}
+
+#[tauri::command]
+fn delete_cursor_api_key(
+    state: State<'_, AppState>,
+) -> Result<credentials::CredentialStatus, String> {
+    let store = state
+        .cursor_credential_store
+        .as_ref()
+        .ok_or("Системное хранилище секретов недоступно")?;
+    store.delete()?;
+    *state
+        .cursor_api_key
+        .write()
+        .map_err(|_| "Не удалось заблокировать настройки")? = None;
+    credential_status(&state)
+}
+
+fn credential_status(state: &AppState) -> Result<credentials::CredentialStatus, String> {
+    let key = state
+        .cursor_api_key
+        .read()
+        .map_err(|_| "Не удалось прочитать настройки")?;
+    let error = state
+        .credential_error
+        .read()
+        .map_err(|_| "Не удалось прочитать состояние хранилища")?
+        .clone();
+    Ok(credentials::status(key.as_ref(), error))
+}
+
+#[tauri::command]
+fn load_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let workspace = state
+        .task_store
+        .get_setting(WORKSPACE_SETTING)
+        .map_err(|error| error.to_string())?
+        .or_else(|| {
+            state
+                .task_store
+                .list_tasks()
+                .ok()
+                .and_then(|tasks| tasks.into_iter().next())
+                .map(|task| task.spec.workspace)
+        })
+        .unwrap_or_default();
+    let theme = state
+        .task_store
+        .get_setting("theme")
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| "system".into());
+    Ok(AppSettings { workspace, theme })
+}
+
+#[tauri::command]
+fn save_workspace_setting(workspace: String, state: State<'_, AppState>) -> Result<(), String> {
+    let workspace = workspace.trim();
+    if workspace.is_empty() {
+        return Err("Рабочая папка не задана".into());
+    }
+    state
+        .task_store
+        .set_setting(WORKSPACE_SETTING, workspace)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_theme_setting(theme: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !matches!(theme.as_str(), "system" | "light" | "dark") {
+        return Err("Неизвестная тема".into());
+    }
+    state
+        .task_store
+        .set_setting("theme", &theme)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -102,8 +222,7 @@ async fn execute_task(
         .read()
         .map_err(|_| "Не удалось прочитать настройки")?
         .as_ref()
-        .map(|secret| secret.expose_secret().to_owned())
-        .ok_or("Cursor API key не задан")?;
+        .map(|secret| secret.expose_secret().to_owned());
     {
         let mut active_tasks = state.active_tasks.lock().await;
         if !active_tasks.insert(task_id) {
@@ -113,7 +232,7 @@ async fn execute_task(
     let result = yarocursor_core::orchestrator::execute_task(
         &state.task_store,
         task_id,
-        &cursor_api_key,
+        cursor_api_key.as_deref(),
         state.cursor_bridge_binary.as_deref(),
         &state.worktree_root,
         &state.cursor_state_root,
@@ -187,7 +306,18 @@ pub fn run() {
             let worktree_root = app_data.join("worktrees");
             let cursor_state_root = app_data.join("cursor-sdk-state");
             std::fs::create_dir_all(&cursor_state_root)?;
+            let (cursor_credential_store, cursor_api_key, credential_error) =
+                match credentials::CursorCredentialStore::new() {
+                    Ok(store) => match store.load() {
+                        Ok(key) => (Some(store), key, None),
+                        Err(error) => (Some(store), None, Some(error)),
+                    },
+                    Err(error) => (None, None, Some(error)),
+                };
             app.manage(AppState::new(
+                cursor_api_key,
+                cursor_credential_store,
+                credential_error,
                 bridge,
                 task_store,
                 worktree_root,
@@ -196,7 +326,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            cursor_credential_status,
             set_cursor_api_key,
+            delete_cursor_api_key,
+            load_app_settings,
+            save_workspace_setting,
+            save_theme_setting,
             inspect_environment,
             start_codex_login,
             create_task_plan,

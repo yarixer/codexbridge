@@ -1,12 +1,12 @@
 # Yarocursor
 
-Yarocursor is a small desktop control plane for an opinionated two-agent workflow:
+Yarocursor is a desktop agent client for an opinionated two-agent workflow:
 
 - GPT-6 Astra plans work and reviews the result through Codex App Server.
 - Cursor Grok 4.6 executes coding tasks through Cursor SDK Bridge.
 - The Rust orchestrator owns state, Git isolation, validation, retries, and budgets.
 
-The project is at milestone 1: a first end-to-end local orchestration loop. The UI verifies both providers, accepts a task, asks Astra for a structured read-only plan, waits for explicit user approval, runs Grok 4.6 xHigh Fast in an isolated Git worktree, executes validation commands, and sends the resulting diff to Astra for a read-only verdict. Task state and artifacts are persisted in SQLite under the application data directory.
+The current build contains the first end-to-end local orchestration loop and the new agent-client shell. The UI restores the active repository and theme, verifies both providers in the background, accepts a task in chat, asks Astra for a structured read-only plan, waits for explicit user approval, runs Grok 4.6 xHigh Fast in an isolated Git worktree, executes validation commands, and sends the resulting diff to Astra for a read-only verdict. Task state, artifacts, and non-secret settings are persisted in SQLite under the application data directory.
 
 ## Prerequisites
 
@@ -40,7 +40,7 @@ npm install
 npm run tauri dev
 ```
 
-The Cursor key entered in the UI lives only in process memory and is cleared when the app exits. You can also run the terminal diagnostic with `CURSOR_API_KEY` already set:
+The Cursor key entered in the UI is stored by the operating system (Windows Credential Manager or Linux Secret Service) and is restored when Yarocursor starts. It is never written to SQLite or frontend storage. You can remove it from the settings panel. You can also run the terminal diagnostic with `CURSOR_API_KEY` already set:
 
 ```text
 cargo run -p yarocursor-core --bin yarocursor-doctor -- /path/to/project

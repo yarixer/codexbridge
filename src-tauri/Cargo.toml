@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+keyring = "4.2"
 secrecy.workspace = true
 serde.workspace = true
 tauri = { version = "2", features = [] }

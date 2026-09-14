@@ -82,7 +82,7 @@ pub async fn create_and_plan(store: &TaskStore, request: CreateTaskRequest) -> R
 pub async fn execute_task(
     store: &TaskStore,
     task_id: Uuid,
-    cursor_api_key: &str,
+    cursor_api_key: Option<&str>,
     cursor_bridge_binary: Option<&Path>,
     worktree_root: &Path,
     cursor_state_root: &Path,
@@ -103,6 +103,15 @@ pub async fn execute_task(
     let plan = store
         .load_artifact::<ArchitectPlan>(task_id, PLAN_ARTIFACT)?
         .context("план Astra не найден")?;
+    let cursor_api_key = if start_stage == TaskStatus::Executing {
+        Some(
+            cursor_api_key
+                .filter(|value| !value.trim().is_empty())
+                .context("Cursor API key не задан")?,
+        )
+    } else {
+        None
+    };
     let worktree = git::create_worktree(
         &task.spec.workspace,
         &task.spec.base_commit,
@@ -118,7 +127,7 @@ pub async fn execute_task(
         let task_cursor_state_root = cursor_state_root.join(task_id.to_string());
         let worker = match cursor::execute(
             &worktree,
-            cursor_api_key,
+            cursor_api_key.expect("ключ проверен для стадии выполнения"),
             cursor_bridge_binary,
             &task_cursor_state_root,
             &prompt,
