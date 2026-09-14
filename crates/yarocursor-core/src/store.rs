@@ -9,7 +9,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-use crate::task::{Task, TaskSpec, TaskStatus};
+use crate::{
+    task::{Task, TaskSpec, TaskStatus},
+    workspace::{Chat, Project},
+};
 
 pub struct TaskStore {
     connection: Mutex<Connection>,
@@ -49,8 +52,41 @@ impl TaskStore {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                remote_url TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chats (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS chats_project_updated
+                ON chats(project_id, archived, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS chat_tasks (
+                chat_id TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS messages_chat_created
+                ON messages(chat_id, created_at);",
         )?;
+        migrate_legacy_tasks(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -281,6 +317,292 @@ impl TaskStore {
         )?;
         Ok(())
     }
+
+    pub fn upsert_project(
+        &self,
+        name: &str,
+        path: &str,
+        remote_url: Option<&str>,
+    ) -> Result<Project> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let now = now_unix();
+        let id = Uuid::new_v4();
+        connection.execute(
+            "INSERT INTO projects (id, name, path, remote_url, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(path) DO UPDATE SET
+               name = excluded.name,
+               remote_url = COALESCE(excluded.remote_url, projects.remote_url),
+               updated_at = excluded.updated_at",
+            params![id.to_string(), name, path, remote_url, now],
+        )?;
+        connection
+            .query_row(
+                "SELECT id, name, path, remote_url, created_at, updated_at FROM projects WHERE path = ?1",
+                [path],
+                project_from_row,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn list_projects(&self) -> Result<Vec<Project>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, path, remote_url, created_at, updated_at
+             FROM projects ORDER BY updated_at DESC, name COLLATE NOCASE",
+        )?;
+        Ok(statement
+            .query_map([], project_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn get_project(&self, id: Uuid) -> Result<Option<Project>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        connection
+            .query_row(
+                "SELECT id, name, path, remote_url, created_at, updated_at FROM projects WHERE id = ?1",
+                [id.to_string()],
+                project_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn create_chat(&self, project_id: Uuid, title: &str) -> Result<Chat> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let id = Uuid::new_v4();
+        let now = now_unix();
+        let title = if title.trim().is_empty() {
+            "Новый чат"
+        } else {
+            title.trim()
+        };
+        connection.execute(
+            "INSERT INTO chats (id, project_id, title, archived, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+            params![id.to_string(), project_id.to_string(), title, now],
+        )?;
+        drop(connection);
+        self.get_chat(id)?.context("чат не найден после создания")
+    }
+
+    pub fn get_chat(&self, id: Uuid) -> Result<Option<Chat>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        connection
+            .query_row(
+                "SELECT c.id, c.project_id, c.title, c.archived, c.created_at, c.updated_at,
+                        ct.task_id, t.status
+                 FROM chats c
+                 LEFT JOIN chat_tasks ct ON ct.chat_id = c.id
+                 LEFT JOIN tasks t ON t.id = ct.task_id
+                 WHERE c.id = ?1",
+                [id.to_string()],
+                chat_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_chats(&self, project_id: Uuid, archived: bool) -> Result<Vec<Chat>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let mut statement = connection.prepare(
+            "SELECT c.id, c.project_id, c.title, c.archived, c.created_at, c.updated_at,
+                    ct.task_id, t.status
+             FROM chats c
+             LEFT JOIN chat_tasks ct ON ct.chat_id = c.id
+             LEFT JOIN tasks t ON t.id = ct.task_id
+             WHERE c.project_id = ?1 AND c.archived = ?2
+             ORDER BY c.updated_at DESC",
+        )?;
+        Ok(statement
+            .query_map(params![project_id.to_string(), archived], chat_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn archive_chat(&self, id: Uuid, archived: bool) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let changed = connection.execute(
+            "UPDATE chats SET archived = ?1, updated_at = ?2 WHERE id = ?3",
+            params![archived, now_unix(), id.to_string()],
+        )?;
+        if changed != 1 {
+            bail!("чат не найден")
+        }
+        Ok(())
+    }
+
+    pub fn link_task_to_chat(&self, chat_id: Uuid, task_id: Uuid, title: &str) -> Result<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let now = now_unix();
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO chat_tasks (chat_id, task_id) VALUES (?1, ?2)
+             ON CONFLICT(chat_id) DO UPDATE SET task_id = excluded.task_id",
+            params![chat_id.to_string(), task_id.to_string()],
+        )?;
+        transaction.execute(
+            "UPDATE chats SET title = ?1, updated_at = ?2 WHERE id = ?3",
+            params![title, now, chat_id.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn task_for_chat(&self, chat_id: Uuid) -> Result<Option<Uuid>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+        let id = connection
+            .query_row(
+                "SELECT task_id FROM chat_tasks WHERE chat_id = ?1",
+                [chat_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        id.map(|id| Uuid::parse_str(&id).context("повреждён task id чата"))
+            .transpose()
+    }
+}
+
+fn migrate_legacy_tasks(connection: &Connection) -> Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT t.id, t.spec_json, t.created_at, t.updated_at
+         FROM tasks t LEFT JOIN chat_tasks ct ON ct.task_id = t.id
+         WHERE ct.task_id IS NULL ORDER BY t.created_at",
+    )?;
+    let legacy = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (task_id, spec_json, created_at, updated_at) in legacy {
+        let spec: TaskSpec = serde_json::from_str(&spec_json)?;
+        let project_id = connection
+            .query_row(
+                "SELECT id FROM projects WHERE path = ?1",
+                [&spec.workspace],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let name = std::path::Path::new(&spec.workspace)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Repository");
+        connection.execute(
+            "INSERT OR IGNORE INTO projects (id, name, path, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project_id, name, spec.workspace, created_at, updated_at],
+        )?;
+        let chat_id = Uuid::new_v4().to_string();
+        connection.execute(
+            "INSERT INTO chats (id, project_id, title, archived, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+            params![
+                chat_id,
+                project_id,
+                short_title(&spec.goal),
+                created_at,
+                updated_at
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO chat_tasks (chat_id, task_id) VALUES (?1, ?2)",
+            params![chat_id, task_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn short_title(value: &str) -> String {
+    let value = value.trim().replace(['\r', '\n'], " ");
+    let mut title = value.chars().take(64).collect::<String>();
+    if value.chars().count() > 64 {
+        title.push('…');
+    }
+    if title.is_empty() {
+        "Новый чат".into()
+    } else {
+        title
+    }
+}
+
+fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: parse_uuid_column(row, 0)?,
+        name: row.get(1)?,
+        path: row.get(2)?,
+        remote_url: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+fn chat_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
+    let task_id = row
+        .get::<_, Option<String>>(6)?
+        .map(|id| Uuid::parse_str(&id).map_err(|error| conversion_error(6, error)))
+        .transpose()?;
+    let task_status = row
+        .get::<_, Option<String>>(7)?
+        .map(|status| {
+            serde_json::from_str(&format!("\"{status}\""))
+                .map_err(|error| conversion_error(7, error))
+        })
+        .transpose()?;
+    Ok(Chat {
+        id: parse_uuid_column(row, 0)?,
+        project_id: parse_uuid_column(row, 1)?,
+        title: row.get(2)?,
+        archived: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        task_id,
+        task_status,
+    })
+}
+
+fn parse_uuid_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Uuid> {
+    let value: String = row.get(index)?;
+    Uuid::parse_str(&value).map_err(|error| conversion_error(index, error))
+}
+
+fn conversion_error(
+    index: usize,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(error))
 }
 
 fn append_event(
@@ -388,6 +710,18 @@ mod tests {
             store.get_setting("workspace").unwrap().as_deref(),
             Some("C:/repo")
         );
+
+        let project = store
+            .upsert_project("repo", "C:/repo", Some("https://example.com/repo.git"))
+            .unwrap();
+        assert_eq!(store.list_projects().unwrap(), vec![project.clone()]);
+        let chat = store.create_chat(project.id, "Исправить ошибку").unwrap();
+        store.link_task_to_chat(chat.id, task.id, "Задача").unwrap();
+        assert_eq!(store.task_for_chat(chat.id).unwrap(), Some(task.id));
+        assert_eq!(store.list_chats(project.id, false).unwrap().len(), 1);
+        store.archive_chat(chat.id, true).unwrap();
+        assert!(store.list_chats(project.id, false).unwrap().is_empty());
+        assert_eq!(store.list_chats(project.id, true).unwrap().len(), 1);
 
         store
             .save_artifact(task.id, "answer", &serde_json::json!({ "ok": true }))

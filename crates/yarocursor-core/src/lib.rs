@@ -6,5 +6,6 @@ pub mod orchestrator;
 pub mod store;
 pub mod task;
 pub mod validation;
+pub mod workspace;
 
 pub use diagnostics::{EnvironmentReport, ProviderHealth};

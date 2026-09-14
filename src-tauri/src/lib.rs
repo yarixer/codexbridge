@@ -15,6 +15,8 @@ const WORKSPACE_SETTING: &str = "workspace";
 struct AppSettings {
     workspace: String,
     theme: String,
+    active_project_id: Option<String>,
+    active_chat_id: Option<String>,
 }
 
 struct AppState {
@@ -140,7 +142,20 @@ fn load_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> 
         .get_setting("theme")
         .map_err(|error| error.to_string())?
         .unwrap_or_else(|| "system".into());
-    Ok(AppSettings { workspace, theme })
+    let active_project_id = state
+        .task_store
+        .get_setting("activeProjectId")
+        .map_err(|error| error.to_string())?;
+    let active_chat_id = state
+        .task_store
+        .get_setting("activeChatId")
+        .map_err(|error| error.to_string())?;
+    Ok(AppSettings {
+        workspace,
+        theme,
+        active_project_id,
+        active_chat_id,
+    })
 }
 
 #[tauri::command]
@@ -163,6 +178,153 @@ fn save_theme_setting(theme: String, state: State<'_, AppState>) -> Result<(), S
     state
         .task_store
         .set_setting("theme", &theme)
+        .map_err(|error| error.to_string())
+}
+
+fn remember_project(
+    state: &AppState,
+    project: &yarocursor_core::workspace::Project,
+) -> Result<(), String> {
+    state
+        .task_store
+        .set_setting(WORKSPACE_SETTING, &project.path)
+        .and_then(|()| {
+            state
+                .task_store
+                .set_setting("activeProjectId", &project.id.to_string())
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_projects(
+    state: State<'_, AppState>,
+) -> Result<Vec<yarocursor_core::workspace::Project>, String> {
+    state
+        .task_store
+        .list_projects()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn add_existing_project(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<yarocursor_core::workspace::Project, String> {
+    let (path, name) = yarocursor_core::workspace::existing_repository(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let project = state
+        .task_store
+        .upsert_project(&name, &path, None)
+        .map_err(|error| error.to_string())?;
+    remember_project(&state, &project)?;
+    Ok(project)
+}
+
+#[tauri::command]
+async fn create_repository_project(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<yarocursor_core::workspace::Project, String> {
+    let (path, name) = yarocursor_core::workspace::create_repository(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let project = state
+        .task_store
+        .upsert_project(&name, &path, None)
+        .map_err(|error| error.to_string())?;
+    remember_project(&state, &project)?;
+    Ok(project)
+}
+
+#[tauri::command]
+async fn clone_repository_project(
+    url: String,
+    destination: String,
+    state: State<'_, AppState>,
+) -> Result<yarocursor_core::workspace::Project, String> {
+    let (path, name) = yarocursor_core::workspace::clone_repository(&url, &destination)
+        .await
+        .map_err(|error| error.to_string())?;
+    let project = state
+        .task_store
+        .upsert_project(&name, &path, Some(url.trim()))
+        .map_err(|error| error.to_string())?;
+    remember_project(&state, &project)?;
+    Ok(project)
+}
+
+#[tauri::command]
+fn select_project(project_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let project_id = Uuid::parse_str(&project_id).map_err(|_| "Некорректный project id")?;
+    let project = state
+        .task_store
+        .get_project(project_id)
+        .map_err(|error| error.to_string())?
+        .ok_or("Проект не найден")?;
+    remember_project(&state, &project)
+}
+
+#[tauri::command]
+fn create_chat(
+    project_id: String,
+    title: String,
+    state: State<'_, AppState>,
+) -> Result<yarocursor_core::workspace::Chat, String> {
+    let project_id = Uuid::parse_str(&project_id).map_err(|_| "Некорректный project id")?;
+    let chat = state
+        .task_store
+        .create_chat(project_id, &title)
+        .map_err(|error| error.to_string())?;
+    state
+        .task_store
+        .set_setting("activeChatId", &chat.id.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(chat)
+}
+
+#[tauri::command]
+fn list_chats(
+    project_id: String,
+    archived: bool,
+    state: State<'_, AppState>,
+) -> Result<Vec<yarocursor_core::workspace::Chat>, String> {
+    let project_id = Uuid::parse_str(&project_id).map_err(|_| "Некорректный project id")?;
+    state
+        .task_store
+        .list_chats(project_id, archived)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn archive_chat(chat_id: String, archived: bool, state: State<'_, AppState>) -> Result<(), String> {
+    let chat_id = Uuid::parse_str(&chat_id).map_err(|_| "Некорректный chat id")?;
+    state
+        .task_store
+        .archive_chat(chat_id, archived)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_chat_session(
+    chat_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<yarocursor_core::orchestrator::TaskSession>, String> {
+    let chat_id = Uuid::parse_str(&chat_id).map_err(|_| "Некорректный chat id")?;
+    state
+        .task_store
+        .set_setting("activeChatId", &chat_id.to_string())
+        .map_err(|error| error.to_string())?;
+    let Some(task_id) = state
+        .task_store
+        .task_for_chat(chat_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    yarocursor_core::orchestrator::load_session(&state.task_store, task_id)
+        .map(Some)
         .map_err(|error| error.to_string())
 }
 
@@ -204,11 +366,21 @@ async fn start_codex_login(app: AppHandle, state: State<'_, AppState>) -> Result
 #[tauri::command]
 async fn create_task_plan(
     request: yarocursor_core::orchestrator::CreateTaskRequest,
+    chat_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<yarocursor_core::orchestrator::TaskSession, String> {
-    yarocursor_core::orchestrator::create_and_plan(&state.task_store, request)
+    let title = request.goal.trim().chars().take(64).collect::<String>();
+    let session = yarocursor_core::orchestrator::create_and_plan(&state.task_store, request)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if let Some(chat_id) = chat_id {
+        let chat_id = Uuid::parse_str(&chat_id).map_err(|_| "Некорректный chat id")?;
+        state
+            .task_store
+            .link_task_to_chat(chat_id, session.task.id, &title)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(session)
 }
 
 #[tauri::command]
@@ -287,6 +459,7 @@ fn latest_task_session(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let executable = if cfg!(windows) {
                 "cursor-sdk-bridge.exe"
@@ -332,6 +505,15 @@ pub fn run() {
             load_app_settings,
             save_workspace_setting,
             save_theme_setting,
+            list_projects,
+            add_existing_project,
+            create_repository_project,
+            clone_repository_project,
+            select_project,
+            create_chat,
+            list_chats,
+            archive_chat,
+            load_chat_session,
             inspect_environment,
             start_codex_login,
             create_task_plan,

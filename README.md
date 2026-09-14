@@ -6,7 +6,7 @@ Yarocursor is a desktop agent client for an opinionated two-agent workflow:
 - Cursor Grok 4.6 executes coding tasks through Cursor SDK Bridge.
 - The Rust orchestrator owns state, Git isolation, validation, retries, and budgets.
 
-The current build contains the first end-to-end local orchestration loop and the new agent-client shell. The UI restores the active repository and theme, verifies both providers in the background, accepts a task in chat, asks Astra for a structured read-only plan, waits for explicit user approval, runs Grok 4.6 xHigh Fast in an isolated Git worktree, executes validation commands, and sends the resulting diff to Astra for a read-only verdict. Task state, artifacts, and non-secret settings are persisted in SQLite under the application data directory.
+The current build contains the first end-to-end local orchestration loop and a Cursor Desktop-style agent shell. Projects can be added from disk, initialized, or cloned; chats are stored per project and grouped by run state. The UI restores the active repository, chat, and theme, verifies both providers in the background, accepts a task in chat, asks Astra for a structured read-only plan, waits for explicit user approval, runs Grok 4.6 xHigh Fast in an isolated Git worktree, executes validation commands, and sends the resulting diff to Astra for a read-only verdict. Legacy tasks are migrated into projects and chats automatically. Task state, artifacts, and non-secret settings are persisted in SQLite under the application data directory.
 
 ## Prerequisites
 
