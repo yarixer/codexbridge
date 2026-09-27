@@ -1,4 +1,4 @@
-use yarocursor_core::{codex, git, task::TaskSpec};
+use codexbridge_core::{codex, git, task::TaskSpec};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -6,13 +6,13 @@ async fn main() -> anyhow::Result<()> {
     let workspace = arguments.next().unwrap_or_else(|| ".".into());
     let goal = arguments
         .next()
-        .unwrap_or_else(|| "Опиши минимальное безопасное улучшение этого проекта".into());
+        .unwrap_or_else(|| "Describe a minimal, safe improvement to this project".into());
     let repository = git::inspect(&workspace).await?;
     let spec = TaskSpec {
         goal,
         workspace: repository.root,
         base_commit: repository.head,
-        constraints: vec!["Не изменять файлы во время планирования".into()],
+        constraints: vec!["Do not modify files during planning".into()],
         acceptance_criteria: vec![],
         validation_commands: vec![],
         max_worker_attempts: 1,

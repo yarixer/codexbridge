@@ -1,5 +1,5 @@
 [package]
-name = "yarocursor-core"
+name = "codexbridge-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

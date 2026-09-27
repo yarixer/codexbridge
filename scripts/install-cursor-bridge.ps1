@@ -17,7 +17,7 @@ $expectedSha256 = "7121271f4dc4802d16530e25446df60361a5432adf69db454785131139e63
 $downloadUrl = "https://github.com/cursor/sdk-bridge/releases/download/v$Version/$archiveName"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $installRoot = Join-Path $projectRoot ".tools\cursor-sdk-bridge"
-$archivePath = Join-Path ([System.IO.Path]::GetTempPath()) "yarocursor-$archiveName"
+$archivePath = Join-Path ([System.IO.Path]::GetTempPath()) "codexbridge-$archiveName"
 
 Write-Host "Downloading Cursor SDK Bridge v$Version..."
 Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath

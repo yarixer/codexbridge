@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/yarocursor-core", "src-tauri"]
+members = ["crates/codexbridge-core", "src-tauri"]
 resolver = "2"
 
 [workspace.package]

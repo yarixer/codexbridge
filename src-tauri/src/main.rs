@@ -1,3 +1,3 @@
 fn main() {
-    yarocursor_lib::run();
+    codexbridge_lib::run();
 }

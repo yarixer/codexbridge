@@ -24,19 +24,19 @@ fn default_max_worker_attempts() -> u8 {
 impl TaskSpec {
     pub fn validate(&self) -> Result<(), String> {
         if self.goal.trim().is_empty() {
-            return Err("Цель задачи не может быть пустой".into());
+            return Err("Task goal cannot be empty".into());
         }
         if self.workspace.trim().is_empty() {
-            return Err("Рабочая папка не может быть пустой".into());
+            return Err("Workspace cannot be empty".into());
         }
         if self.base_commit.trim().is_empty() {
-            return Err("Базовый commit не может быть пустым".into());
+            return Err("Base commit cannot be empty".into());
         }
         if self.max_worker_attempts == 0 {
-            return Err("Нужна хотя бы одна попытка исполнителя".into());
+            return Err("At least one implementation attempt is required".into());
         }
         if self.validation_commands.iter().any(Vec::is_empty) {
-            return Err("Команда проверки не может быть пустой".into());
+            return Err("Validation command cannot be empty".into());
         }
         Ok(())
     }

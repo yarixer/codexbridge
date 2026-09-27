@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Yarocursor",
+  "productName": "CodexBridge",
   "version": "0.3.0",
-  "identifier": "dev.yaro.yarocursor",
+  "identifier": "com.yarixer.codexbridge",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,8 @@
   "app": {
     "windows": [
       {
-        "title": "Yarocursor",
+        "title": "CodexBridge",
+        "decorations": false,
         "width": 1180,
         "height": 760,
         "minWidth": 900,

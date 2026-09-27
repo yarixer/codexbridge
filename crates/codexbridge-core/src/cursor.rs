@@ -54,7 +54,7 @@ impl Bridge {
         if let Some(state_root) = state_root {
             std::fs::create_dir_all(state_root).with_context(|| {
                 format!(
-                    "не удалось создать каталог состояния Cursor {}",
+                    "failed to create Cursor state directory {}",
                     state_root.display()
                 )
             })?;
@@ -62,8 +62,8 @@ impl Bridge {
         }
         let mut child = command
             .spawn()
-            .with_context(|| format!("не удалось запустить {}", binary.display()))?;
-        let stderr = child.stderr.take().context("bridge не открыл stderr")?;
+            .with_context(|| format!("failed to start {}", binary.display()))?;
+        let stderr = child.stderr.take().context("bridge did not open stderr")?;
         let (ready_sender, ready_receiver) = oneshot::channel();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
@@ -72,7 +72,7 @@ impl Bridge {
                 if let Some(payload) = line.strip_prefix(READY_PREFIX) {
                     if let Some(sender) = ready_sender.take() {
                         let discovery = serde_json::from_str::<Discovery>(payload)
-                            .context("неверная ready-строка bridge");
+                            .context("invalid bridge ready line");
                         let _ = sender.send(discovery);
                     }
                 } else {
@@ -80,22 +80,22 @@ impl Bridge {
                 }
             }
             if let Some(sender) = ready_sender {
-                let _ = sender.send(Err(anyhow::anyhow!("bridge завершился до ready-строки")));
+                let _ = sender.send(Err(anyhow::anyhow!("bridge exited before its ready line")));
             }
         });
         let discovery = timeout(Duration::from_secs(30), ready_receiver)
             .await
-            .context("таймаут запуска Cursor SDK Bridge")?
-            .context("канал запуска Cursor SDK Bridge закрыт")??;
+            .context("Cursor SDK Bridge startup timed out")?
+            .context("Cursor SDK Bridge startup channel closed")??;
 
         if discovery.schema_version != 1
             || discovery.transport != "tcp"
             || discovery.protocol != "connect"
         {
-            bail!("неподдерживаемый протокол Cursor SDK Bridge")
+            bail!("unsupported Cursor SDK Bridge protocol")
         }
         let token = std::fs::read_to_string(&discovery.auth_token_file)
-            .context("не удалось прочитать bridge bearer token")?;
+            .context("failed to read the bridge bearer token")?;
         Ok(Self {
             child,
             base_url: discovery.url,
@@ -115,7 +115,7 @@ impl Bridge {
         let body: Value = response
             .json()
             .await
-            .context("bridge вернул не-JSON ответ")?;
+            .context("bridge returned a non-JSON response")?;
         if !status.is_success() {
             bail!("Cursor Bridge {}: {}", status, body)
         }
@@ -124,7 +124,7 @@ impl Bridge {
 
     async fn server_stream(&self, service: &str, method: &str, body: Value) -> Result<Vec<Value>> {
         let payload = serde_json::to_vec(&body)?;
-        let length = u32::try_from(payload.len()).context("слишком большой запрос Cursor")?;
+        let length = u32::try_from(payload.len()).context("Cursor request is too large")?;
         let mut framed = Vec::with_capacity(payload.len() + 5);
         framed.push(0);
         framed.extend_from_slice(&length.to_be_bytes());
@@ -187,20 +187,20 @@ pub async fn execute(
     state_root: &Path,
     prompt: &str,
 ) -> Result<CursorRunResult> {
-    let binary =
-        bridge_binary(preferred_binary).context("Cursor SDK Bridge не установлен или не найден")?;
+    let binary = bridge_binary(preferred_binary)
+        .context("Cursor SDK Bridge is not installed or could not be found")?;
     let workspace_text = workspace
         .to_str()
-        .context("путь worktree содержит неподдерживаемые символы")?;
+        .context("worktree path contains unsupported characters")?;
     std::fs::create_dir_all(state_root).with_context(|| {
         format!(
-            "не удалось создать каталог состояния Cursor {}",
+            "failed to create Cursor state directory {}",
             state_root.display()
         )
     })?;
     let state_root_text = state_root
         .to_str()
-        .context("путь состояния Cursor содержит неподдерживаемые символы")?;
+        .context("Cursor state path contains unsupported characters")?;
     let bridge = Bridge::spawn(&binary, workspace_text, api_key, Some(state_root)).await?;
     let result = execute_inner(&bridge, workspace_text, api_key, state_root_text, prompt).await;
     bridge.shutdown().await;
@@ -230,7 +230,7 @@ async fn execute_inner(
                 "options": {
                     "model": model,
                     "apiKey": api_key,
-                    "name": "Yarocursor worker",
+                    "name": "CodexBridge worker",
                     "local": {
                         "cwd": [workspace],
                         "sandboxOptions": { "enabled": false },
@@ -244,7 +244,7 @@ async fn execute_inner(
     let agent_id = created
         .get("agentId")
         .and_then(Value::as_str)
-        .context("Cursor не вернул agentId")?
+        .context("Cursor did not return agentId")?
         .to_owned();
     let streamed = bridge
         .server_stream(
@@ -276,7 +276,7 @@ fn grok_model_selection(catalog: &Value) -> Result<Value> {
                 .iter()
                 .find(|item| item.get("id").and_then(Value::as_str) == Some("grok-4.6"))
         })
-        .context("grok-4.6 отсутствует в каталоге Cursor")?;
+        .context("grok-4.6 is missing from the Cursor catalog")?;
     let mut params = model
         .get("variants")
         .and_then(Value::as_array)
@@ -296,13 +296,13 @@ fn grok_model_selection(catalog: &Value) -> Result<Value> {
     let definitions = model
         .get("parameters")
         .and_then(Value::as_array)
-        .context("grok-4.6 не содержит параметры модели")?;
+        .context("grok-4.6 has no model parameters")?;
     let effort_id = definitions
         .iter()
         .find(|parameter| has_parameter_value(parameter, "xhigh"))
         .and_then(|parameter| parameter.get("id"))
         .and_then(Value::as_str)
-        .context("grok-4.6 не поддерживает xhigh")?;
+        .context("grok-4.6 does not support xhigh")?;
     upsert_model_parameter(&mut params, effort_id, "xhigh");
 
     if let Some(fast_id) = definitions
@@ -336,7 +336,7 @@ fn grok_model_selection(catalog: &Value) -> Result<Value> {
             })
         });
     if !has_fast {
-        bail!("grok-4.6 не содержит конфигурацию Fast")
+        bail!("grok-4.6 has no Fast configuration")
     }
     Ok(json!({ "id": "grok-4.6", "params": params }))
 }
@@ -370,7 +370,7 @@ fn decode_connect_json_stream(bytes: &[u8]) -> Result<Vec<Value>> {
     let mut saw_end = false;
     while cursor < bytes.len() {
         if bytes.len() - cursor < 5 {
-            bail!("Cursor stream содержит неполный заголовок frame")
+            bail!("Cursor stream contains an incomplete frame header")
         }
         let flags = bytes[cursor];
         let length = u32::from_be_bytes([
@@ -383,16 +383,16 @@ fn decode_connect_json_stream(bytes: &[u8]) -> Result<Vec<Value>> {
         let end = cursor
             .checked_add(length)
             .filter(|end| *end <= bytes.len())
-            .context("Cursor stream содержит неполный frame")?;
+            .context("Cursor stream contains an incomplete frame")?;
         let payload = &bytes[cursor..end];
         cursor = end;
         if flags & 0x01 != 0 {
-            bail!("сжатые Cursor stream frames пока не поддерживаются")
+            bail!("compressed Cursor stream frames are not supported yet")
         }
         let value = if payload.is_empty() {
             json!({})
         } else {
-            serde_json::from_slice::<Value>(payload).context("неверный JSON в Cursor stream")?
+            serde_json::from_slice::<Value>(payload).context("invalid JSON in Cursor stream")?
         };
         if flags & 0x02 != 0 {
             saw_end = true;
@@ -404,7 +404,7 @@ fn decode_connect_json_stream(bytes: &[u8]) -> Result<Vec<Value>> {
         messages.push(value);
     }
     if !saw_end {
-        bail!("Cursor stream завершился без EndStreamResponse")
+        bail!("Cursor stream ended without EndStreamResponse")
     }
     Ok(messages)
 }
@@ -433,7 +433,7 @@ fn parse_cursor_run(agent_id: &str, messages: Vec<Value>) -> Result<CursorRunRes
             terminal = Some(result);
         }
     }
-    let terminal = terminal.context("Cursor stream не вернул terminal result")?;
+    let terminal = terminal.context("Cursor stream did not return a terminal result")?;
     let result = terminal.get("result").unwrap_or(terminal);
     let status = result
         .get("status")
@@ -442,8 +442,8 @@ fn parse_cursor_run(agent_id: &str, messages: Vec<Value>) -> Result<CursorRunRes
         .unwrap_or_else(|| "unknown".into());
     if !status.to_ascii_lowercase().contains("finished") && status != "3" {
         return Err(anyhow!(
-            "Grok завершил run со статусом {status}: {}",
-            last_status_message.unwrap_or_else(|| "без описания ошибки".into())
+            "Grok run ended with status {status}: {}",
+            last_status_message.unwrap_or_else(|| "no error description".into())
         ));
     }
     Ok(CursorRunResult {
@@ -548,8 +548,8 @@ pub async fn probe(
     let Some(binary) = bridge_binary(preferred_binary) else {
         return ProviderHealth {
             state: HealthState::MissingDependency,
-            title: "Cursor SDK Bridge не установлен".into(),
-            detail: "Установи закреплённую версию bridge или укажи CURSOR_SDK_BRIDGE_BIN.".into(),
+            title: "Cursor SDK Bridge is not installed".into(),
+            detail: "Install the pinned bridge version or set CURSOR_SDK_BRIDGE_BIN.".into(),
             models: vec![],
             usage: None,
         };
@@ -563,22 +563,22 @@ pub async fn probe(
                 bridge.shutdown().await;
                 match version {
                     Ok(version) => format!(
-                        "Bridge отвечает (версия {}). Добавь Cursor API key для проверки каталога моделей.",
+                        "Bridge is responding (version {}). Add a Cursor API key to check the model catalog.",
                         version
                             .get("bridgeVersion")
                             .or_else(|| version.get("serverVersion"))
                             .unwrap_or(&version)
                     ),
                     Err(error) => {
-                        format!("Bridge найден, но проверка протокола не прошла: {error}")
+                        format!("Bridge was found, but the protocol check failed: {error}")
                     }
                 }
             }
-            Err(error) => format!("Bridge найден, но не запустился: {error}"),
+            Err(error) => format!("Bridge was found but failed to start: {error}"),
         };
         return ProviderHealth {
             state: HealthState::NeedsApiKey,
-            title: "Нужен Cursor API key".into(),
+            title: "Cursor API key required".into(),
             detail,
             models: vec![],
             usage: None,
@@ -590,7 +590,7 @@ pub async fn probe(
         Err(error) => {
             return ProviderHealth {
                 state: HealthState::Unavailable,
-                title: "Cursor Bridge не запустился".into(),
+                title: "Cursor Bridge failed to start".into(),
                 detail: error.to_string(),
                 models: vec![],
                 usage: None,
@@ -649,15 +649,15 @@ pub async fn probe(
                     HealthState::Unavailable
                 },
                 title: if supports_xhigh_fast {
-                    "Grok 4.6 xHigh Fast готов"
+                    "Grok 4.6 xHigh Fast is ready"
                 } else if grok.is_some() {
-                    "Нет конфигурации xHigh Fast"
+                    "No xHigh Fast configuration"
                 } else {
-                    "Grok 4.6 не найден"
+                    "Grok 4.6 not found"
                 }
                 .into(),
                 detail: format!(
-                    "Bridge отвечает; версия: {}.",
+                    "Bridge is responding; version: {}.",
                     version
                         .get("bridgeVersion")
                         .or_else(|| version.get("serverVersion"))
@@ -669,7 +669,7 @@ pub async fn probe(
         }
         Err(error) => ProviderHealth {
             state: HealthState::Unavailable,
-            title: "Ошибка Cursor SDK".into(),
+            title: "Cursor SDK error".into(),
             detail: error.to_string(),
             models: vec![],
             usage: None,

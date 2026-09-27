@@ -27,7 +27,7 @@ pub async fn run_all(worktree: &Path, commands: &[Vec<String>]) -> Result<Vec<Va
         };
         let executable = resolve_program(program).ok_or_else(|| {
             anyhow!(
-                "программа `{program}` не найдена в PATH для команды `{}`",
+                "program `{program}` was not found in PATH for command `{}`",
                 command.join(" ")
             )
         })?;
@@ -37,10 +37,10 @@ pub async fn run_all(worktree: &Path, commands: &[Vec<String>]) -> Result<Vec<Va
             .output();
         let output = timeout(Duration::from_secs(900), child)
             .await
-            .with_context(|| format!("таймаут команды `{}`", command.join(" ")))?
+            .with_context(|| format!("command `{}` timed out", command.join(" ")))?
             .with_context(|| {
                 format!(
-                    "не удалось запустить команду `{}` через {}",
+                    "failed to run command `{}` through {}",
                     command.join(" "),
                     executable.display()
                 )

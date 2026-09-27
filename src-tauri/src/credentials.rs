@@ -2,7 +2,7 @@ use keyring::{Entry, Error};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 
-const SERVICE: &str = "dev.yaro.yarocursor";
+const SERVICE: &str = "com.yarixer.codexbridge";
 const CURSOR_ACCOUNT: &str = "cursor-api-key";
 
 pub struct CursorCredentialStore {
@@ -22,7 +22,7 @@ impl CursorCredentialStore {
     pub fn new() -> Result<Self, String> {
         Entry::new(SERVICE, CURSOR_ACCOUNT)
             .map(|entry| Self { entry })
-            .map_err(|error| format!("Системное хранилище секретов недоступно: {error}"))
+            .map_err(|error| format!("System credential storage is unavailable: {error}"))
     }
 
     pub fn load(&self) -> Result<Option<SecretString>, String> {
@@ -30,20 +30,20 @@ impl CursorCredentialStore {
             Ok(value) if value.trim().is_empty() => Ok(None),
             Ok(value) => Ok(Some(SecretString::from(value))),
             Err(Error::NoEntry) => Ok(None),
-            Err(error) => Err(format!("Не удалось прочитать Cursor API key: {error}")),
+            Err(error) => Err(format!("Failed to read the Cursor API key: {error}")),
         }
     }
 
     pub fn save(&self, value: &str) -> Result<(), String> {
         self.entry
             .set_password(value)
-            .map_err(|error| format!("Не удалось сохранить Cursor API key: {error}"))
+            .map_err(|error| format!("Failed to save the Cursor API key: {error}"))
     }
 
     pub fn delete(&self) -> Result<(), String> {
         match self.entry.delete_credential() {
             Ok(()) | Err(Error::NoEntry) => Ok(()),
-            Err(error) => Err(format!("Не удалось удалить Cursor API key: {error}")),
+            Err(error) => Err(format!("Failed to delete the Cursor API key: {error}")),
         }
     }
 }
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn masks_secret_without_exposing_the_middle() {
-        assert_eq!(mask("crsr_0123456789"), "crsr••••6789");
+        assert_eq!(mask("test_0123456789"), "test••••6789");
         assert_eq!(mask("short"), "••••••••");
     }
 }

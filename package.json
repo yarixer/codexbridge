@@ -1,5 +1,5 @@
 {
-  "name": "yarocursor",
+  "name": "codexbridge",
   "private": true,
   "version": "0.3.0",
   "type": "module",
@@ -14,7 +14,9 @@
     "@tauri-apps/plugin-opener": "^2.5.0",
     "lucide-react": "^0.544.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.4",

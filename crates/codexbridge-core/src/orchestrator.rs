@@ -48,7 +48,7 @@ pub async fn create_and_plan(store: &TaskStore, request: CreateTaskRequest) -> R
     let repository = git::inspect(&request.workspace).await?;
     if repository.dirty {
         bail!(
-            "Рабочая папка содержит незакоммиченные изменения. Сначала создай commit или stash, чтобы Astra и Grok работали от одной базы."
+            "The workspace contains uncommitted changes. Commit or stash them first so Astra and Grok work from the same baseline."
         );
     }
     let spec = TaskSpec {
@@ -87,7 +87,7 @@ pub async fn execute_task(
     worktree_root: &Path,
     cursor_state_root: &Path,
 ) -> Result<TaskSession> {
-    let task = store.get_task(task_id)?.context("задача не найдена")?;
+    let task = store.get_task(task_id)?.context("task not found")?;
     let start_stage = match task.status {
         TaskStatus::Planning | TaskStatus::NeedsRevision => TaskStatus::Executing,
         TaskStatus::Blocked => match store.blocked_from(task_id)? {
@@ -95,19 +95,19 @@ pub async fn execute_task(
             Some(TaskStatus::Reviewing) => TaskStatus::Reviewing,
             _ => TaskStatus::Executing,
         },
-        status => return Err(anyhow!("задачу в состоянии {status} нельзя запустить")),
+        status => return Err(anyhow!("a task in state {status} cannot be started")),
     };
     if task.worker_attempts >= task.spec.max_worker_attempts && task.status != TaskStatus::Blocked {
-        return Err(anyhow!("исчерпан лимит попыток Grok"));
+        return Err(anyhow!("Grok attempt limit exhausted"));
     }
     let plan = store
         .load_artifact::<ArchitectPlan>(task_id, PLAN_ARTIFACT)?
-        .context("план Astra не найден")?;
+        .context("Astra plan not found")?;
     let cursor_api_key = if start_stage == TaskStatus::Executing {
         Some(
             cursor_api_key
                 .filter(|value| !value.trim().is_empty())
-                .context("Cursor API key не задан")?,
+                .context("Cursor API key is not configured")?,
         )
     } else {
         None
@@ -127,7 +127,7 @@ pub async fn execute_task(
         let task_cursor_state_root = cursor_state_root.join(task_id.to_string());
         let worker = match cursor::execute(
             &worktree,
-            cursor_api_key.expect("ключ проверен для стадии выполнения"),
+            cursor_api_key.expect("key checked for the execution stage"),
             cursor_bridge_binary,
             &task_cursor_state_root,
             &prompt,
@@ -155,7 +155,7 @@ pub async fn execute_task(
     let validation = if start_stage == TaskStatus::Reviewing {
         store
             .load_artifact::<Vec<ValidationResult>>(task_id, VALIDATION_ARTIFACT)?
-            .context("результаты проверки не найдены")?
+            .context("validation results not found")?
     } else {
         let validation = match validation::run_all(&worktree, &task.spec.validation_commands).await
         {
@@ -176,7 +176,7 @@ pub async fn execute_task(
                 task_id,
                 TaskStatus::Validating,
                 TaskStatus::NeedsRevision,
-                Some("одна или несколько команд проверки завершились ошибкой"),
+                Some("one or more validation commands failed"),
             )?;
             return load_session(store, task_id);
         }
@@ -209,7 +209,7 @@ pub async fn execute_task(
         .join("\n\n");
     let review_workspace = worktree
         .to_str()
-        .context("путь worktree содержит неподдерживаемые символы")?;
+        .context("worktree path contains unsupported characters")?;
     let review = match codex::review_task(
         review_workspace,
         &task.spec,
@@ -245,7 +245,7 @@ pub async fn execute_task(
 }
 
 pub fn load_session(store: &TaskStore, task_id: Uuid) -> Result<TaskSession> {
-    let task = store.get_task(task_id)?.context("задача не найдена")?;
+    let task = store.get_task(task_id)?.context("task not found")?;
     let blocked_from = if task.status == TaskStatus::Blocked {
         store.blocked_from(task_id)?
     } else {
@@ -281,7 +281,7 @@ pub fn recover_interrupted_tasks(store: &TaskStore) -> Result<usize> {
                 task.id,
                 task.status,
                 TaskStatus::Blocked,
-                Some("предыдущий процесс Yarocursor завершился во время выполнения"),
+                Some("the previous CodexBridge process exited during execution"),
             )?;
             recovered += 1;
         }
@@ -296,12 +296,12 @@ fn worker_prompt(
 ) -> Result<String> {
     let revision = previous_review.map_or_else(String::new, |review| {
         format!(
-            "\n\nЗамечания предыдущего ревью, которые нужно исправить:\n{}",
+            "\n\nIssues from the previous review that must be fixed:\n{}",
             review.issues.join("\n")
         )
     });
     Ok(format!(
-        "Ты исполнитель Yarocursor. Реализуй задачу в текущем Git worktree. Изменяй файлы и запускай нужные локальные проверки. Не создавай commit и не меняй другие checkout. Не ограничивайся объяснением: доведи код до рабочего состояния.\n\nЦель:\n{}\n\nОграничения:\n{}\n\nКритерии приёмки:\n{}\n\nУтверждённый план Astra:\n{}{}",
+        "You are the CodexBridge implementation agent. Implement the task in the current Git worktree. Modify files and run the necessary local checks. Do not create a commit or modify other checkouts. Do not stop at an explanation: bring the code to a working state.\n\nGoal:\n{}\n\nConstraints:\n{}\n\nAcceptance criteria:\n{}\n\nApproved Astra plan:\n{}{}",
         spec.goal,
         spec.constraints.join("\n"),
         spec.acceptance_criteria.join("\n"),

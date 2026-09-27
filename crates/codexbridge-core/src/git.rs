@@ -38,7 +38,7 @@ pub async fn create_worktree(
     worktree_root: &Path,
     task_id: Uuid,
 ) -> Result<PathBuf> {
-    std::fs::create_dir_all(worktree_root).context("не удалось создать каталог worktrees")?;
+    std::fs::create_dir_all(worktree_root).context("failed to create the worktrees directory")?;
     let path = worktree_root.join(task_id.to_string());
     if path.is_dir() {
         return Ok(path);
@@ -49,7 +49,7 @@ pub async fn create_worktree(
         .arg(base_commit)
         .output()
         .await
-        .context("не удалось запустить git worktree add")?;
+        .context("failed to run git worktree add")?;
     if !output.status.success() {
         bail!(
             "git worktree add: {}",
@@ -65,7 +65,7 @@ pub async fn diff(worktree: &Path) -> Result<String> {
         .current_dir(worktree)
         .output()
         .await
-        .context("не удалось подготовить новые файлы для git diff")?;
+        .context("failed to stage new files for git diff")?;
     if !intent_to_add.status.success() {
         bail!(
             "git add --intent-to-add: {}",
@@ -77,7 +77,7 @@ pub async fn diff(worktree: &Path) -> Result<String> {
         .current_dir(worktree)
         .output()
         .await
-        .context("не удалось получить git diff")?;
+        .context("failed to obtain git diff")?;
     if !output.status.success() {
         bail!(
             "git diff: {}",
@@ -94,7 +94,7 @@ async fn git_output(workspace: &str, args: &[&str]) -> Result<String> {
         .args(args)
         .output()
         .await
-        .context("не удалось запустить git")?;
+        .context("failed to run git")?;
     if !output.status.success() {
         bail!(
             "git {}: {}",
@@ -125,7 +125,7 @@ mod tests {
         run(&["add", "tracked.txt"]);
         run(&[
             "-c",
-            "user.name=Yarocursor Test",
+            "user.name=CodexBridge Test",
             "-c",
             "user.email=test@localhost",
             "commit",

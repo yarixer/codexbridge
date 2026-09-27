@@ -39,11 +39,20 @@ impl CodexClient {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .context("не удалось запустить `codex app-server`")?;
+            .context("failed to start `codex app-server`")?;
 
-        let stdin = child.stdin.take().context("app-server не открыл stdin")?;
-        let stdout = child.stdout.take().context("app-server не открыл stdout")?;
-        let stderr = child.stderr.take().context("app-server не открыл stderr")?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("app-server did not open stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("app-server did not open stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("app-server did not open stderr")?;
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (notifications, _) = broadcast::channel(512);
 
@@ -93,8 +102,8 @@ impl CodexClient {
             "initialize",
             json!({
                 "clientInfo": {
-                    "name": "yarocursor",
-                    "title": "Yarocursor",
+                    "name": "codexbridge",
+                    "title": "CodexBridge",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             }),
@@ -112,8 +121,8 @@ impl CodexClient {
 
         timeout(Duration::from_secs(20), receiver)
             .await
-            .context("таймаут ответа Codex App Server")?
-            .context("канал ответа Codex App Server закрыт")?
+            .context("Codex App Server response timed out")?
+            .context("Codex App Server response channel closed")?
             .map_err(|error| anyhow!("Codex App Server: {error}"))
     }
 
@@ -146,7 +155,7 @@ pub async fn probe() -> ProviderHealth {
         Err(error) => {
             return ProviderHealth {
                 state: HealthState::MissingDependency,
-                title: "Codex CLI не найден".into(),
+                title: "Codex CLI not found".into(),
                 detail: error.to_string(),
                 models: vec![],
                 usage: None,
@@ -163,7 +172,7 @@ pub async fn probe() -> ProviderHealth {
             client.shutdown().await;
             return ProviderHealth {
                 state: HealthState::Unavailable,
-                title: "Codex App Server недоступен".into(),
+                title: "Codex App Server unavailable".into(),
                 detail: error.to_string(),
                 models: vec![],
                 usage: None,
@@ -176,16 +185,16 @@ pub async fn probe() -> ProviderHealth {
         client.shutdown().await;
         let detail = match account_type {
             Some("apiKey") => {
-                "Codex сейчас использует OpenAI API key. Войди через ChatGPT, чтобы расходовать лимиты подписки."
+                "Codex is currently using an OpenAI API key. Sign in with ChatGPT to use your subscription limits."
             }
             Some(_) => {
-                "Codex использует другой способ авторизации. Войди через ChatGPT, чтобы Astra работала по подписке."
+                "Codex is using a different authentication method. Sign in with ChatGPT so Astra can use your subscription."
             }
-            None => "Войди через ChatGPT, чтобы Astra использовала лимиты подписки.",
+            None => "Sign in with ChatGPT so Astra can use your subscription limits.",
         };
         return ProviderHealth {
             state: HealthState::NeedsLogin,
-            title: "Требуется вход в ChatGPT".into(),
+            title: "ChatGPT sign-in required".into(),
             detail: detail.into(),
             models: vec![],
             usage: None,
@@ -228,16 +237,16 @@ pub async fn probe() -> ProviderHealth {
             HealthState::Unavailable
         },
         title: if astra {
-            "Astra готова"
+            "Astra is ready"
         } else {
-            "Astra не найдена"
+            "Astra not found"
         }
         .into(),
         detail: if astra {
-            "Codex подключён через ChatGPT; модель gpt-6-astra доступна.".into()
+            "Codex is connected through ChatGPT; the gpt-6-astra model is available.".into()
         } else {
             format!(
-                "Codex авторизован, но gpt-6-astra отсутствует в каталоге (моделей: {}).",
+                "Codex is authenticated, but gpt-6-astra is missing from the catalog (models: {}).",
                 models.len()
             )
         },
@@ -261,14 +270,14 @@ pub async fn begin_chatgpt_login() -> Result<(CodexClient, String)> {
     let url = result
         .get("authUrl")
         .and_then(Value::as_str)
-        .context("Codex не вернул authUrl")?
+        .context("Codex did not return authUrl")?
         .to_owned();
     Ok((client, url))
 }
 
 pub async fn plan_task(spec: &TaskSpec) -> Result<ArchitectPlan> {
     let prompt = format!(
-        "Ты архитектор Yarocursor. Изучи репозиторий только для чтения и составь точный план для одного coding-агента Cursor. Не изменяй файлы и не пиши реализацию. План должен быть достаточно конкретным, чтобы исполнитель мог работать автономно.\n\nЦель:\n{}\n\nОграничения:\n{}\n\nКритерии приёмки:\n{}\n\nКоманды проверки:\n{}",
+        "You are the CodexBridge architect. Inspect the repository in read-only mode and create a precise plan for a single Cursor coding agent. Do not modify files or write the implementation. The plan must be specific enough for the implementation agent to work autonomously.\n\nGoal:\n{}\n\nConstraints:\n{}\n\nAcceptance criteria:\n{}\n\nValidation commands:\n{}",
         spec.goal,
         display_lines(&spec.constraints),
         display_lines(&spec.acceptance_criteria),
@@ -289,7 +298,7 @@ pub async fn review_task(
     validation_summary: &str,
 ) -> Result<ArchitectReview> {
     let prompt = format!(
-        "Ты финальный ревьюер Yarocursor. Проверь реализацию относительно цели, плана и критериев приёмки. Работай только для чтения. Не исправляй код. Одобряй только если нет блокирующих ошибок.\n\nЦель:\n{}\n\nПлан:\n{}\n\nРезультаты проверок:\n{}\n\nGit diff:\n{}",
+        "You are the final CodexBridge reviewer. Review the implementation against the goal, plan, and acceptance criteria. Work in read-only mode. Do not fix the code. Approve only if there are no blocking issues.\n\nGoal:\n{}\n\nPlan:\n{}\n\nValidation results:\n{}\n\nGit diff:\n{}",
         spec.goal,
         serde_json::to_string_pretty(plan)?,
         validation_summary,
@@ -332,14 +341,14 @@ async fn structured_turn_inner<T: DeserializeOwned>(
                 "cwd": workspace,
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
-                "serviceName": "yarocursor"
+                "serviceName": "codexbridge"
             }),
         )
         .await?;
     let thread_id = thread
         .pointer("/thread/id")
         .and_then(Value::as_str)
-        .context("Codex не вернул thread.id")?
+        .context("Codex did not return thread.id")?
         .to_owned();
     let mut notifications = client.subscribe();
     let turn = client
@@ -364,7 +373,7 @@ async fn structured_turn_inner<T: DeserializeOwned>(
     let turn_id = turn
         .pointer("/turn/id")
         .and_then(Value::as_str)
-        .context("Codex не вернул turn.id")?
+        .context("Codex did not return turn.id")?
         .to_owned();
 
     let wait_for_result = async {
@@ -373,7 +382,7 @@ async fn structured_turn_inner<T: DeserializeOwned>(
             let notification = notifications
                 .recv()
                 .await
-                .context("канал событий Codex закрыт")?;
+                .context("Codex event channel closed")?;
             let method = notification.get("method").and_then(Value::as_str);
             if method == Some("item/completed") {
                 let item = notification.pointer("/params/item");
@@ -407,18 +416,18 @@ async fn structured_turn_inner<T: DeserializeOwned>(
                 let message = completed_turn
                     .and_then(|value| value.pointer("/error/message"))
                     .and_then(Value::as_str)
-                    .unwrap_or("ход Astra завершился с ошибкой");
+                    .unwrap_or("Astra turn failed");
                 return Err(anyhow!(message.to_owned()));
             }
-            let text = final_text.context("Astra не вернула структурированный ответ")?;
+            let text = final_text.context("Astra did not return a structured response")?;
             return serde_json::from_str::<T>(strip_json_fence(&text))
-                .context("не удалось разобрать структурированный ответ Astra");
+                .context("failed to parse Astra's structured response");
         }
     };
 
     let result = timeout(Duration::from_secs(900), wait_for_result)
         .await
-        .context("таймаут хода Astra")?;
+        .context("Astra turn timed out")?;
     let _ = client
         .request("thread/delete", json!({ "threadId": thread_id }))
         .await;

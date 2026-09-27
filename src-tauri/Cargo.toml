@@ -1,11 +1,11 @@
 [package]
-name = "yarocursor"
+name = "codexbridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "yarocursor_lib"
+name = "codexbridge_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -20,4 +20,4 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2.7.3"
 tokio.workspace = true
 uuid.workspace = true
-yarocursor-core = { path = "../crates/yarocursor-core" }
+codexbridge-core = { path = "../crates/codexbridge-core" }

@@ -7,3 +7,14 @@
 .env
 .env.*
 !.env.example
+
+# Local databases and credentials
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.pem
+*.key
+*.p12
+*.pfx

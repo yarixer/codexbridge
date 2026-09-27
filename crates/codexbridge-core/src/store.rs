@@ -20,7 +20,8 @@ pub struct TaskStore {
 
 impl TaskStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let connection = Connection::open(path).context("не удалось открыть базу Yarocursor")?;
+        let connection =
+            Connection::open(path).context("failed to open the CodexBridge database")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute_batch(
@@ -105,7 +106,7 @@ impl TaskStore {
         let mut connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO tasks (id, spec_json, status, worker_attempts, created_at, updated_at)
@@ -134,7 +135,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         connection.query_row(
             "SELECT id, spec_json, status, worker_attempts, created_at, updated_at FROM tasks WHERE id = ?1",
             [id.to_string()],
@@ -146,7 +147,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let mut statement = connection.prepare(
             "SELECT id, spec_json, status, worker_attempts, created_at, updated_at FROM tasks ORDER BY updated_at DESC"
         )?;
@@ -163,12 +164,12 @@ impl TaskStore {
         reason: Option<&str>,
     ) -> Result<Task> {
         if !expected.can_transition_to(next) {
-            bail!("недопустимый переход задачи: {expected} -> {next}");
+            bail!("invalid task transition: {expected} -> {next}");
         }
         let mut connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let transaction = connection.transaction()?;
         let now = now_unix();
         let changed = transaction.execute(
@@ -176,7 +177,7 @@ impl TaskStore {
             params![next.to_string(), now, id.to_string(), expected.to_string()],
         )?;
         if changed != 1 {
-            bail!("задача изменилась или не существует; ожидалось состояние {expected}");
+            bail!("task changed or does not exist; expected state {expected}");
         }
         append_event(
             &transaction,
@@ -192,26 +193,24 @@ impl TaskStore {
         )?;
         transaction.commit()?;
         drop(connection);
-        self.get_task(id)?
-            .context("задача исчезла после обновления")
+        self.get_task(id)?.context("task disappeared after update")
     }
 
     pub fn increment_worker_attempts(&self, id: Uuid) -> Result<Task> {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let now = now_unix();
         let changed = connection.execute(
             "UPDATE tasks SET worker_attempts = worker_attempts + 1, updated_at = ?1 WHERE id = ?2",
             params![now, id.to_string()],
         )?;
         if changed != 1 {
-            bail!("задача не существует")
+            bail!("task does not exist")
         }
         drop(connection);
-        self.get_task(id)?
-            .context("задача исчезла после обновления")
+        self.get_task(id)?.context("task disappeared after update")
     }
 
     pub fn save_artifact<T: Serialize>(
@@ -223,7 +222,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         connection.execute(
             "INSERT INTO task_artifacts (task_id, artifact_type, payload_json, created_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -248,7 +247,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let payload = connection
             .query_row(
                 "SELECT payload_json FROM task_artifacts WHERE task_id = ?1 AND artifact_type = ?2",
@@ -257,7 +256,7 @@ impl TaskStore {
             )
             .optional()?;
         payload
-            .map(|json| serde_json::from_str(&json).context("повреждённый артефакт задачи"))
+            .map(|json| serde_json::from_str(&json).context("corrupted task artifact"))
             .transpose()
     }
 
@@ -265,7 +264,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let payload = connection
             .query_row(
                 "SELECT payload_json FROM task_events
@@ -279,16 +278,14 @@ impl TaskStore {
             return Ok(None);
         };
         let payload: serde_json::Value =
-            serde_json::from_str(&payload).context("повреждено событие перехода задачи")?;
+            serde_json::from_str(&payload).context("corrupted task transition event")?;
         if payload.get("to").and_then(serde_json::Value::as_str) != Some("blocked") {
             return Ok(None);
         }
         payload
             .get("from")
             .cloned()
-            .map(|value| {
-                serde_json::from_value(value).context("неизвестный этап блокировки задачи")
-            })
+            .map(|value| serde_json::from_value(value).context("unknown task blocking stage"))
             .transpose()
     }
 
@@ -296,7 +293,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         connection
             .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
                 row.get(0)
@@ -309,7 +306,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         connection.execute(
             "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
@@ -327,7 +324,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let now = now_unix();
         let id = Uuid::new_v4();
         connection.execute(
@@ -352,7 +349,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let mut statement = connection.prepare(
             "SELECT id, name, path, remote_url, created_at, updated_at
              FROM projects ORDER BY updated_at DESC, name COLLATE NOCASE",
@@ -366,7 +363,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         connection
             .query_row(
                 "SELECT id, name, path, remote_url, created_at, updated_at FROM projects WHERE id = ?1",
@@ -381,11 +378,11 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let id = Uuid::new_v4();
         let now = now_unix();
         let title = if title.trim().is_empty() {
-            "Новый чат"
+            "New chat"
         } else {
             title.trim()
         };
@@ -395,14 +392,14 @@ impl TaskStore {
             params![id.to_string(), project_id.to_string(), title, now],
         )?;
         drop(connection);
-        self.get_chat(id)?.context("чат не найден после создания")
+        self.get_chat(id)?.context("chat not found after creation")
     }
 
     pub fn get_chat(&self, id: Uuid) -> Result<Option<Chat>> {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         connection
             .query_row(
                 "SELECT c.id, c.project_id, c.title, c.archived, c.created_at, c.updated_at,
@@ -422,7 +419,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let mut statement = connection.prepare(
             "SELECT c.id, c.project_id, c.title, c.archived, c.created_at, c.updated_at,
                     ct.task_id, t.status
@@ -441,13 +438,13 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let changed = connection.execute(
             "UPDATE chats SET archived = ?1, updated_at = ?2 WHERE id = ?3",
             params![archived, now_unix(), id.to_string()],
         )?;
         if changed != 1 {
-            bail!("чат не найден")
+            bail!("chat not found")
         }
         Ok(())
     }
@@ -456,7 +453,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let now = now_unix();
         let transaction = connection.unchecked_transaction()?;
         transaction.execute(
@@ -476,7 +473,7 @@ impl TaskStore {
         let connection = self
             .connection
             .lock()
-            .map_err(|_| anyhow::anyhow!("база задач заблокирована"))?;
+            .map_err(|_| anyhow::anyhow!("task database is locked"))?;
         let id = connection
             .query_row(
                 "SELECT task_id FROM chat_tasks WHERE chat_id = ?1",
@@ -484,7 +481,7 @@ impl TaskStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        id.map(|id| Uuid::parse_str(&id).context("повреждён task id чата"))
+        id.map(|id| Uuid::parse_str(&id).context("corrupted chat task id"))
             .transpose()
     }
 }
@@ -552,7 +549,7 @@ fn short_title(value: &str) -> String {
         title.push('…');
     }
     if title.is_empty() {
-        "Новый чат".into()
+        "New chat".into()
     } else {
         title
     }
@@ -664,11 +661,11 @@ mod tests {
 
     fn spec() -> TaskSpec {
         TaskSpec {
-            goal: "Исправить ошибку".into(),
+            goal: "Fix the bug".into(),
             workspace: "C:/repo".into(),
             base_commit: "abc123".into(),
-            constraints: vec!["Сохранить API".into()],
-            acceptance_criteria: vec!["Тест проходит".into()],
+            constraints: vec!["Preserve the API".into()],
+            acceptance_criteria: vec!["The test passes".into()],
             validation_commands: vec![vec!["cargo".into(), "test".into()]],
             max_worker_attempts: 2,
         }
@@ -690,7 +687,7 @@ mod tests {
                 task.id,
                 TaskStatus::Planning,
                 TaskStatus::Blocked,
-                Some("ошибка"),
+                Some("error"),
             )
             .unwrap();
         assert_eq!(
@@ -715,8 +712,8 @@ mod tests {
             .upsert_project("repo", "C:/repo", Some("https://example.com/repo.git"))
             .unwrap();
         assert_eq!(store.list_projects().unwrap(), vec![project.clone()]);
-        let chat = store.create_chat(project.id, "Исправить ошибку").unwrap();
-        store.link_task_to_chat(chat.id, task.id, "Задача").unwrap();
+        let chat = store.create_chat(project.id, "Fix the bug").unwrap();
+        store.link_task_to_chat(chat.id, task.id, "Task").unwrap();
         assert_eq!(store.task_for_chat(chat.id).unwrap(), Some(task.id));
         assert_eq!(store.list_chats(project.id, false).unwrap().len(), 1);
         store.archive_chat(chat.id, true).unwrap();

@@ -40,16 +40,16 @@ pub async fn existing_repository(path: &str) -> Result<(String, String)> {
 pub async fn create_repository(path: &str) -> Result<(String, String)> {
     let requested = normalized_path(path)?;
     if requested.exists() && requested.read_dir()?.next().is_some() {
-        bail!("Папка для нового репозитория должна быть пустой")
+        bail!("The folder for the new repository must be empty")
     }
     std::fs::create_dir_all(&requested)
-        .with_context(|| format!("не удалось создать папку {}", requested.display()))?;
+        .with_context(|| format!("failed to create folder {}", requested.display()))?;
     let output = Command::new("git")
         .args(["init", "--initial-branch=main"])
         .arg(&requested)
         .output()
         .await
-        .context("не удалось запустить git init")?;
+        .context("failed to run git init")?;
     if !output.status.success() {
         bail!(
             "git init: {}",
@@ -64,11 +64,11 @@ pub async fn create_repository(path: &str) -> Result<(String, String)> {
 pub async fn clone_repository(url: &str, destination: &str) -> Result<(String, String)> {
     let url = url.trim();
     if url.is_empty() {
-        bail!("Git URL не задан")
+        bail!("Git URL is not specified")
     }
     let destination = normalized_path(destination)?;
     if destination.exists() && destination.read_dir()?.next().is_some() {
-        bail!("Папка назначения должна быть пустой")
+        bail!("The destination folder must be empty")
     }
     let output = Command::new("git")
         .arg("clone")
@@ -77,7 +77,7 @@ pub async fn clone_repository(url: &str, destination: &str) -> Result<(String, S
         .arg(&destination)
         .output()
         .await
-        .context("не удалось запустить git clone")?;
+        .context("failed to run git clone")?;
     if !output.status.success() {
         bail!(
             "git clone: {}",
@@ -97,10 +97,10 @@ async fn repository_root(path: &str) -> Result<String> {
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .await
-        .context("не удалось запустить git")?;
+        .context("failed to run git")?;
     if !output.status.success() {
         bail!(
-            "выбранная папка не является Git-репозиторием: {}",
+            "the selected folder is not a Git repository: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )
     }
@@ -110,7 +110,7 @@ async fn repository_root(path: &str) -> Result<String> {
 fn normalized_path(path: &str) -> Result<PathBuf> {
     let path = path.trim();
     if path.is_empty() {
-        bail!("Путь к репозиторию не задан")
+        bail!("Repository path is not specified")
     }
     let path = Path::new(path);
     if path.is_absolute() {
@@ -160,7 +160,7 @@ mod tests {
         run(&["add", "README.md"]);
         run(&[
             "-c",
-            "user.name=Yarocursor Test",
+            "user.name=CodexBridge Test",
             "-c",
             "user.email=test@localhost",
             "commit",
